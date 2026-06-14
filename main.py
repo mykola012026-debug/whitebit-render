@@ -47,6 +47,14 @@ def save_data(data):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+# Функція для красивого динамічного виводу малих цін (наприклад, PEPE)
+def format_price(price):
+    if price is None:
+        return "0.0"
+    if price < 1.0:
+        return f"{price:.8f}".rstrip('0').rstrip('.') if price > 0 else "0.0"
+    return f"{price:.2f}"
+
 # ==========================================
 # ОДИН ЦИКЛ СКАНУВАННЯ
 # ==========================================
@@ -101,7 +109,10 @@ def run_scanner_cycle():
         if pair in data["active_trades"]:
             trade = data["active_trades"][pair]
             direction = trade.get("direction", "LONG")
-            print(f"  ⏳ Контроль {direction} позиції {pair}. Вхід: {trade['buy_price']} | Поточна: {current_price}")
+            
+            p_in = format_price(trade['buy_price'])
+            p_curr = format_price(current_price)
+            print(f"  ⏳ Контроль {direction} позиції {pair}. Вхід: {p_in} | Поточна: {p_curr}")
 
             closed = False
             pnl = 0.0
@@ -147,7 +158,10 @@ def run_scanner_cycle():
                     p_change = ((current_price - trade["buy_price"]) / trade["buy_price"]) * 100
                 else:
                     p_change = ((trade["buy_price"] - current_price) / trade["buy_price"]) * 100
-                print(f"  💸 [{pair}] Поточний результат: {p_change:+.2f}% (Коридор: {trade['stop_loss']:.2f} - {trade['take_profit']:.2f})")
+                
+                sl_str = format_price(trade['stop_loss'])
+                tp_str = format_price(trade['take_profit'])
+                print(f"  💸 [{pair}] Поточний результат: {p_change:+.2f}% (Коридор: {sl_str} - {tp_str})")
 
         # --------------------------------------------------------
         # КРОК 2: ПОШУК ТОЧОК ВХОДУ (ЛОНГ АБО ШОРТ)
@@ -163,6 +177,7 @@ def run_scanner_cycle():
             if volume_spike:
                 if free_balance >= INVEST_PER_TRADE:
                     ratio = current_volume / avg_volume
+                    p_curr = format_price(current_price)
 
                     if is_green_candle:
                         print(f"  🔥 СНАЙПЕРСЬКИЙ СИГНАЛ (LONG) НА {pair}! Об'єм вище в {ratio:.1f} разів!")
@@ -176,7 +191,7 @@ def run_scanner_cycle():
                             "status": "OPEN",
                             "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                         }
-                        print(f"  🚀 Віртуально КУПЛЕНО (LONG) {pair} по {current_price} USDT.")
+                        print(f"  🚀 Віртуально КУПЛЕНО (LONG) {pair} по {p_curr} USDT.")
 
                     else:
                         print(f"  🔥 СНАЙПЕРСЬКИЙ СИГНАЛ (SHORT) НА {pair}! Об'єм вище в {ratio:.1f} разів!")
@@ -190,7 +205,7 @@ def run_scanner_cycle():
                             "status": "OPEN",
                             "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                         }
-                        print(f"  🚀 Віртуально ПРОДАНО (SHORT) {pair} по {current_price} USDT.")
+                        print(f"  🚀 Віртуально ПРОДАНО (SHORT) {pair} по {p_curr} USDT.")
                 else:
                     print(f"  🙅‍♂️ Сигнал по {pair} є, але вільні USDT закінчилися.")
             else:
