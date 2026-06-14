@@ -17,10 +17,16 @@ STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
 INVEST_PER_TRADE = 10.0     # Об'єм однієї угоди
 
-# Якщо на Render підключено Persistent Disk з Mount Path: /data
-# файл буде зберігатися надійно. Якщо ні — створиться локально.
-if os.path.exists("/data"):
-    DB_FILE = "/data/virtual_portfolio.json"
+# Автоматичне визначення та створення папки на Persistent Disk Render
+if os.path.exists("/data") or os.environ.get("RENDER"): 
+    DB_DIR = "/data"
+    if not os.path.exists(DB_DIR):
+        try:
+            os.makedirs(DB_DIR, exist_ok=True)
+        except Exception as e:
+            print(f"⚠️ Не вдалося створити папку /data, збереження буде локальним: {e}")
+            DB_DIR = "."
+    DB_FILE = os.path.join(DB_DIR, "virtual_portfolio.json")
 else:
     DB_FILE = "virtual_portfolio.json"
 
@@ -41,13 +47,17 @@ def load_data():
                 return db
         except Exception:
             pass
+    # Якщо файлу немає, стартуємо чисто зі 100 USDT
     return {"balance_usdt": 100.0, "active_trades": {}, "history": []}
 
 def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"❌ Помилка запису файлу бази даних: {e}")
 
-# Функція для красивого динамічного виводу малих цін (наприклад, PEPE)
+# Допоміжна функція для красивого виводу мікро-цін (наприклад, PEPE)
 def format_price(price):
     if price is None:
         return "0.0"
@@ -218,7 +228,7 @@ def run_scanner_cycle():
 # ГОЛОВНИЙ БЕЗКІНЕЧНИЙ ЦИКЛ (ДЕМОН)
 # ==========================================
 if __name__ == "__main__":
-    print("🤖 Автономний Бот-Снайпер 15m (CCXT) запущений на сервері!")
+    print("🤖 Автономний Бот-Снайпер 15m (CCXT) запущений на сервері з Persistent Disk!")
 
     while True:
         now = datetime.now()
