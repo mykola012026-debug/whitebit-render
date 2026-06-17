@@ -2,6 +2,7 @@ import ccxt
 import json
 import os
 import time
+import csv
 from datetime import datetime
 
 # ==========================================
@@ -28,6 +29,7 @@ if os.path.exists("/data") or os.environ.get("RENDER"):
             DB_DIR = "."
     DB_FILE = os.path.join(DB_DIR, "virtual_portfolio.json")
 else:
+    DB_DIR = "."
     DB_FILE = "virtual_portfolio.json"
 
 # ==========================================
@@ -52,10 +54,61 @@ def load_data():
 
 def save_data(data):
     try:
+        # 1. Спочатку зберігаємо оригінальну базу даних JSON
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
+            
+        # 2. Автоматично створюємо/оновлюємо зручний CSV-файл для аналізу
+        csv_path = os.path.join(DB_DIR, "trades_history.csv")
+        
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            
+            # Статистика балансу
+            writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
+            writer.writerow(["Поточний баланс (USDT)", f"{data.get('balance_usdt', 100.0):.2f}"])
+            writer.writerow([])
+            
+            # Активні угоди
+            writer.writerow(["АКТИВНІ УГОДИ"])
+            active = data.get("active_trades", {})
+            if active:
+                writer.writerow(["Пара", "Напрямок", "Ціна входу", "Інвестовано", "Take Profit", "Stop Loss", "Час відкриття"])
+                for pair, t in active.items():
+                    writer.writerow([
+                        t.get("pair"), 
+                        t.get("direction"), 
+                        t.get("buy_price"), 
+                        t.get("invested_amount"), 
+                        t.get("take_profit"), 
+                        t.get("stop_loss"), 
+                        t.get("open_time")
+                    ])
+            else:
+                writer.writerow(["Немає активних угод"])
+            writer.writerow([])
+            
+            # Історія закритих угод
+            writer.writerow(["ІСТОРІЯ ЗАКРИТИХ УГОД"])
+            history = data.get("history", [])
+            if history:
+                writer.writerow(["Пара", "Напрямок", "Ціна входу", "Ціна виходу", "Інвестовано", "Результат (PnL)", "Статус", "Час закриття"])
+                for t in history:
+                    writer.writerow([
+                        t.get("pair"), 
+                        t.get("direction"), 
+                        t.get("buy_price"), 
+                        t.get("exit_price"), 
+                        t.get("invested_amount"), 
+                        f"{t.get('pnl', 0):+.2f}", 
+                        t.get("status"), 
+                        t.get("close_time")
+                    ])
+            else:
+                writer.writerow(["Історія порожня"])
+                
     except Exception as e:
-        print(f"❌ Помилка запису файлу бази даних: {e}")
+        print(f"❌ Помилка запису файлів бази даних чи CSV: {e}")
 
 # Допоміжна функція для красивого виводу мікро-цін (наприклад, PEPE)
 def format_price(price):
@@ -119,7 +172,7 @@ def run_scanner_cycle():
         if pair in data["active_trades"]:
             trade = data["active_trades"][pair]
             direction = trade.get("direction", "LONG")
-            
+
             p_in = format_price(trade['buy_price'])
             p_curr = format_price(current_price)
             print(f"  ⏳ Контроль {direction} позиції {pair}. Вхід: {p_in} | Поточна: {p_curr}")
@@ -168,7 +221,7 @@ def run_scanner_cycle():
                     p_change = ((current_price - trade["buy_price"]) / trade["buy_price"]) * 100
                 else:
                     p_change = ((trade["buy_price"] - current_price) / trade["buy_price"]) * 100
-                
+
                 sl_str = format_price(trade['stop_loss'])
                 tp_str = format_price(trade['take_profit'])
                 print(f"  💸 [{pair}] Поточний результат: {p_change:+.2f}% (Коридор: {sl_str} - {tp_str})")
