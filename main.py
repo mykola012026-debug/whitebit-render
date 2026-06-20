@@ -10,7 +10,7 @@ from datetime import datetime
 # ==========================================
 SCAN_MARKETS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "FET/USDT", 
-    "ONDO/USDT", "NEAR/USDT", "SUI/USDT", "PEPE/USDT"
+    "ONDO/USDT", "NEAR/USDT", "SUI/USDT"
 ]
 
 TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
@@ -57,18 +57,18 @@ def save_data(data):
         # 1. Спочатку зберігаємо оригінальну базу даних JSON
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
-            
+
         # 2. Автоматично створюємо/оновлюємо зручний CSV-файл для аналізу
         csv_path = os.path.join(DB_DIR, "trades_history.csv")
-        
+
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
-            
+
             # Статистика балансу
             writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
             writer.writerow(["Поточний баланс (USDT)", f"{data.get('balance_usdt', 100.0):.2f}"])
             writer.writerow([])
-            
+
             # Активні угоди
             writer.writerow(["АКТИВНІ УГОДИ"])
             active = data.get("active_trades", {})
@@ -87,7 +87,7 @@ def save_data(data):
             else:
                 writer.writerow(["Немає активних угод"])
             writer.writerow([])
-            
+
             # Історія закритих угод
             writer.writerow(["ІСТОРІЯ ЗАКРИТИХ УГОД"])
             history = data.get("history", [])
@@ -106,11 +106,11 @@ def save_data(data):
                     ])
             else:
                 writer.writerow(["Історія порожня"])
-                
+
     except Exception as e:
         print(f"❌ Помилка запису файлів бази даних чи CSV: {e}")
 
-# Допоміжна функція для красивого виводу мікро-цін (наприклад, PEPE)
+# Допоміжна функція для красивого виводу мікро-цін
 def format_price(price):
     if price is None:
         return "0.0"
