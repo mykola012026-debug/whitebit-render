@@ -18,6 +18,9 @@ STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
 INVEST_PER_TRADE = 10.0     # Об'єм однієї угоди
 
+# ⚠️ ВСТАНОВІТЬ В True НА ОДИН ЗАПУСК, ЩОБ ПОВНІСТЮ ОЧИСТИТИ ІСТОРІЮ І ПОЧАТИ ЗО 100$
+RESET_DATA = True  
+
 if os.path.exists("/data") or os.environ.get("RENDER"): 
     DB_DIR = "/data"
     if not os.path.exists(DB_DIR):
@@ -35,16 +38,23 @@ else:
 # МОДУЛЬ РОБОТИ З ДАНИМИ
 # ==========================================
 def load_data():
+    # Очищення файлу, якщо увімкнено RESET_DATA
+    global RESET_DATA
+    if RESET_DATA:
+        print("🧹 Виявлено запит на очищення даних. Скидаємо портфель до 100 USDT...")
+        if os.path.exists(DB_FILE):
+            try: os.remove(DB_FILE)
+            except: pass
+        RESET_DATA = False # Вимикаємо тригер після очищення
+        return {"balance_usdt": 100.0, "active_trades": {}, "history": []}
+
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f:
                 db = json.load(f)
-                if "active_trades" not in db:
-                    db["active_trades"] = {}
-                if "history" not in db:
-                    db["history"] = []
-                if "balance_usdt" not in db:
-                    db["balance_usdt"] = 100.0
+                if "active_trades" not in db: db["active_trades"] = {}
+                if "history" not in db: db["history"] = []
+                if "balance_usdt" not in db: db["balance_usdt"] = 100.0
                 return db
         except Exception:
             pass
@@ -55,12 +65,18 @@ def save_data(data):
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
+        # Рахуємо загальну вартість активів для збереження в CSV
+        invested_now = sum(t.get("invested_amount", 0) for t in data.get("active_trades", {}).values())
+        total_equity = data.get("balance_usdt", 100.0) + invested_now
+
         csv_path = os.path.join(DB_DIR, "trades_history.csv")
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
 
             writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
-            writer.writerow(["Поточний баланс (Вільний + в угодах)", f"{data.get('balance_usdt', 100.0):.2f}"])
+            writer.writerow(["Загальний капітал (Вільні + в угодах)", f"{total_equity:.2f} USDT"])
+            writer.writerow(["Вільний баланс", f"{data.get('balance_usdt', 100.0):.2f} USDT"])
+            writer.writerow(["Заморожено в угодах", f"{invested_now:.2f} USDT"])
             writer.writerow([])
 
             writer.writerow(["АКТИВНІ УГОДИ"])
@@ -107,12 +123,18 @@ def run_scanner_cycle():
         print(f"❌ Не вдалося ініціалізувати CCXT: {e}")
         return
 
+    # 📈 ОБЧИСЛЕННЯ РЕАЛЬНОЇ СТАТИСТИКИ ПОРТФЕЛЯ
+    active_count = len(data["active_trades"])
+    invested_amount = active_count * INVEST_PER_TRADE
+    total_equity = data["balance_usdt"] + invested_amount
+
     print(f"\n⚡ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Скан аномалій (15m)...")
-    print(f"💰 Загальний капітал рахунку: {data['balance_usdt']:.2f} USDT")
+    print(f"💰 ЗАГАЛЬНИЙ КАПІТАЛ: {total_equity:.2f} USDT (З них в угодах: {invested_amount:.2f} USDT)")
+    print(f"💵 Вільний баланс: {data['balance_usdt']:.2f} USDT")
+    print(f"📊 Активних позицій: {active_count} із {len(SCAN_MARKETS)}")
     print("-" * 50)
 
     for pair in SCAN_MARKETS:
-        # Вільний баланс — це те, що фізично є на балансі прямо зараз
         free_balance = data["balance_usdt"]
         time.sleep(1) 
 
@@ -122,17 +144,15 @@ def run_scanner_cycle():
                 print(f"  ⚠️ [{pair}] Недостатньо свічок для аналізу")
                 continue
 
-            # Об'єм за 24 повні години
             past_volumes = [float(candle[5]) for candle in candles[:-2]]
             avg_volume_24h = sum(past_volumes) / len(past_volumes)
 
-            # Рахуємо середній розмір свічки (High - Low) за добу для фільтрації імпульсів (ATR)
             past_atr = [abs(float(c[2]) - float(c[3])) for c in candles[:-2]]
             avg_atr_24h = sum(past_atr) / len(past_atr)
 
             confirmed_candle = candles[-2]
             confirmed_spread = abs(float(confirmed_candle[2]) - float(confirmed_candle[3]))
-            
+
             current_candle = candles[-1]
             current_price = float(current_candle[4])
 
@@ -186,17 +206,14 @@ def run_scanner_cycle():
                     reason = "TAKE_PROFIT 🟢"
 
             if closed:
-                # Універсальна чиста математика PnL
                 if direction == "LONG":
                     pnl_pct = (exit_p - p_in) / p_in
                 else:
                     pnl_pct = (p_in - exit_p) / p_in
 
                 pnl = invested * pnl_pct
-                
-                # Повертаємо заморожену інвестицію + чистий результат
                 data["balance_usdt"] += (invested + pnl)
-                
+
                 trade["status"] = reason
                 trade["exit_price"] = exit_p
                 trade["close_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -204,32 +221,28 @@ def run_scanner_cycle():
 
                 data["history"].append(trade)
                 del data["active_trades"][pair]
-                print(f"  🏁 Позиція {pair} закрита! Результат: {pnl:+.2f} USDT. Баланс: {data['balance_usdt']:.2f}")
+                print(f"  🏁 Позиція {pair} закрита! Результат: {pnl:+.2f} USDT. Вільний баланс: {data['balance_usdt']:.2f}")
             else:
                 p_change = ((current_price - p_in) / p_in) * 100 if direction == "LONG" else ((p_in - current_price) / p_in) * 100
-                print(f"  💸 Поточний результат: {p_change:+.2f}% (Коридор: {format_price(trade['stop_loss'])} - {format_price(trade['take_profit'])})")
+                print(f"  💸 Поточний результат уından: {p_change:+.2f}% (Коридор: {format_price(trade['stop_loss'])} - {format_price(trade['take_profit'])})")
 
         # --------------------------------------------------------
-        # КРОК 2: ПОШУК ТОЧОК ВХОДУ (ЛОНГ АБО ШОРТ)
+        # КРОК 2: ПОШУК ТОЧОК ВХОДУ
         # --------------------------------------------------------
         else:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
             volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
             is_green_candle = market["close_price"] > market["open_price"]
-            
-            # Захист: якщо сигнальна свічка вже виросла/впала більше ніж на 3 середніх ATR — вхід пропускається
             overextended = market["confirmed_spread"] > (market["avg_atr"] * 3.0)
 
             print(f"  📊 [{pair}] Об'єм: {current_volume:.1f} | Базовий: {avg_volume:.1f}")
 
             if volume_spike:
                 if overextended:
-                    print(f"  🙅‍♂️ Сигнал пропущено: свічка занадто розтягнута (Різик входу на хаях).")
+                    print(f"  🙅‍♂️ Сигнал пропущено: свічка занадто розтягнута.")
                 elif free_balance >= INVEST_PER_TRADE:
                     ratio = current_volume / avg_volume
-
-                    # Фізично забираємо гроші з балансу під угоду
                     data["balance_usdt"] -= INVEST_PER_TRADE
 
                     if is_green_candle:
@@ -256,9 +269,9 @@ def run_scanner_cycle():
                             "status": "OPEN",
                             "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                         }
-                    print(f"  🚀 Угоду відкрито по {format_price(current_price)} USDT. Інвестицію заморожено.")
+                    print(f"  🚀 Угоду відкрито по {format_price(current_price)} USDT. {INVEST_PER_TRADE} USDT заморожено.")
                 else:
-                    print(f"  🙅‍♂️ Вільні USDT закінчилися (Вільний баланс: {free_balance:.2f} USDT).")
+                    print(f"  🙅‍♂️ Вільні USDT закінчилися (Вільний: {free_balance:.2f} USDT).")
             else:
                 print(f"  💤 Аномальних сплесків не виявлено.")
         print("-" * 30)
