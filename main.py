@@ -16,21 +16,21 @@ SCAN_MARKETS = [
 TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
 STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
-INVEST_PER_TRADE = 1.0      # 🔥 Зменшено до 1.0 USDT для безпечного тесту
+INVEST_PER_TRADE = 1.0      # 🔥 Об'єм однієї угоди знижено до 1.0 USDT за запитом
 
 # ⚠️ РЕЖИМ ТЕСТУВАННЯ (DRY RUN)
-# Змініть на False, коли будете готові до реальних торгів на 1 USDT
+# Змініть на False, коли будете готові до реальних торгів на реальні гроші
 DRY_RUN = True 
 
 # ⚠️ ВСТАНОВІТЬ В True НА ОДИН ЗАПУСК, ЩОБ ПОВНІСТЮ ОЧИСТИТИ ІСТОРІЮ В ЛОГАХ
-RESET_DATA = True
+RESET_DATA = False 
 
 # ==========================================
 # ІНІЦІАЛІЗАЦІЯ API
 # ==========================================
 exchange_config = {
-    'apiKey': os.environ.get('WHITEBIT_API_KEY', ''),
-    'secret': os.environ.get('WHITEBIT_SECRET_KEY', ''),
+    'apiKey': os.environ.get('WHITEBIT_API_KEY', '9dfcbc7d6c30802daf10d0bb50bf50d1'),
+    'secret': os.environ.get('WHITEBIT_SECRET_KEY', ''), # Сюди встав свій секретний ключ, якщо тестуєш локально
     'enableRateLimit': True,
     'options': {
         'defaultType': 'spot' # Тільки спотовий ринок (LONG позиції)
@@ -53,12 +53,12 @@ else:
 def load_data():
     global RESET_DATA
     if RESET_DATA:
-        print("🧹 Виявлено запит на очищення даних. Скидаємо лог...")
+        print("🧹 Виявлено запит на очищення даних. Скидаємо лог до 100 USDT...")
         if os.path.exists(DB_FILE):
             try: os.remove(DB_FILE)
             except: pass
         RESET_DATA = False 
-        return {"balance_usdt": 10.0, "active_trades": {}, "history": []}
+        return {"balance_usdt": 100.0, "active_trades": {}, "history": []}
 
     if os.path.exists(DB_FILE):
         try:
@@ -66,11 +66,11 @@ def load_data():
                 db = json.load(f)
                 if "active_trades" not in db: db["active_trades"] = {}
                 if "history" not in db: db["history"] = []
-                if "balance_usdt" not in db: db["balance_usdt"] = 10.0
+                if "balance_usdt" not in db: db["balance_usdt"] = 100.0
                 return db
         except Exception:
             pass
-    return {"balance_usdt": 10.0, "active_trades": {}, "history": []}
+    return {"balance_usdt": 100.0, "active_trades": {}, "history": []}
 
 def save_data(data):
     try:
@@ -78,14 +78,14 @@ def save_data(data):
             json.dump(data, f, indent=4)
 
         invested_now = sum(t.get("invested_amount", 0) for t in data.get("active_trades", {}).values())
-        total_equity = data.get("balance_usdt", 10.0) + invested_now
+        total_equity = data.get("balance_usdt", 100.0) + invested_now
 
         csv_path = os.path.join(DB_DIR, "trades_history.csv")
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
             writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
             writer.writerow(["Загальний капітал", f"{total_equity:.2f} USDT"])
-            writer.writerow(["Вільний баланс", f"{data.get('balance_usdt', 10.0):.2f} USDT"])
+            writer.writerow(["Вільний баланс", f"{data.get('balance_usdt', 100.0):.2f} USDT"])
             writer.writerow(["Заморожено в угодах", f"{invested_now:.2f} USDT"])
             writer.writerow([])
 
@@ -130,7 +130,7 @@ def run_scanner_cycle():
             balances = exchange.fetch_balance()
             data["balance_usdt"] = float(balances['free'].get('USDT', 0.0))
         except Exception as e:
-            print(f"❌ Не вдалося отримати баланс з WhiteBIT: {e}")
+            print(f"❌ Не вдалося отримати реальний баланс з WhiteBIT: {e}")
             return
 
     active_count = len(data["active_trades"])
@@ -148,6 +148,7 @@ def run_scanner_cycle():
         try:
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=98)
             if not candles or len(candles) < 98:
+                print(f"  ⚠️ [{pair}] Недостатньо свічок для аналізу.")
                 continue
 
             past_volumes = [float(candle[5]) for candle in candles[:-2]]
@@ -172,9 +173,18 @@ def run_scanner_cycle():
                 "confirmed_spread": confirmed_spread,
                 "avg_atr": avg_atr_24h
             }
-        except Exception as e:
-            print(f"  ⚠️ Помилка API (fetch_ohlcv) для {pair}: {e}")
+        except ccxt.NetworkError as e:
+            print(f"  ❌ Помилка мережі для {pair} (можливо, ліміт IP на Render): {e}")
             continue
+        except ccxt.ExchangeError as e:
+            print(f"  ❌ Помилка біржі WhiteBIT для {pair}: {e}")
+            continue
+        except Exception as e:
+            print(f"  ⚠️ Загальна помилка API (fetch_ohlcv) для {pair}: {e}")
+            continue
+
+        # Лог стану маркету (щоб бачити, що монета просканована успішно)
+        print(f"  📊 [{pair}] Поточна ціна: {format_price(pair, current_price)} | Об'єм: {market['volume']:.1f} (Базовий: {market['avg_volume_24h']:.1f})")
 
         # --------------------------------------------------------
         # КРОК 1: МЕНЕДЖМЕНТ ВЖЕ ВІДКРИТИХ ПОЗИЦІЙ (LONG)
@@ -184,7 +194,7 @@ def run_scanner_cycle():
             p_in = trade['buy_price']
             coins_amount = trade.get("amount", 0.0)
 
-            print(f"  ⏳ Контроль {pair}. Вхід: {format_price(pair, p_in)} | Поточна: {format_price(pair, current_price)}")
+            print(f"    ⏳ Контроль позиції {pair}. Вхід: {format_price(pair, p_in)}")
 
             closed = False
             exit_p = current_price
@@ -202,7 +212,7 @@ def run_scanner_cycle():
             if closed:
                 if not DRY_RUN:
                     try:
-                        print(f"  📢 [РЕАЛ] Надсилаю ордер на ПРОДАЖ {pair}...")
+                        print(f"    📢 [РЕАЛ] Надсилаю ордер на ПРОДАЖ {pair}...")
                         formatted_amount = exchange.amount_to_precision(pair, coins_amount)
                         
                         order = exchange.create_order(pair, 'market', 'sell', formatted_amount)
@@ -211,9 +221,9 @@ def run_scanner_cycle():
                             exit_p = float(order['average'])
                         elif 'price' in order and order['price']:
                             exit_p = float(order['price'])
-                        print(f"  ✅ [РЕАЛ] Продано успішно по ціні: {format_price(pair, exit_p)}")
+                        print(f"    ✅ [РЕАЛ] Продано успішно по ціні: {format_price(pair, exit_p)}")
                     except Exception as e:
-                        print(f"  ❌ [РЕАЛ] Помилка закриття позиції: {e}. Спробуємо на наступному кроці.")
+                        print(f"    ❌ [РЕАЛ] Помилка закриття позиції: {e}. Спробуємо на наступному кроці.")
                         continue 
 
                 pnl_pct = (exit_p - p_in) / p_in
@@ -229,10 +239,10 @@ def run_scanner_cycle():
 
                 data["history"].append(trade)
                 del data["active_trades"][pair]
-                print(f"  🏁 Позиція {pair} закрита. Результат: {pnl:+.4f} USDT.")
+                print(f"    🏁 Позиція {pair} закрита. Результат: {pnl:+.4f} USDT.")
             else:
                 p_change = ((current_price - p_in) / p_in) * 100
-                print(f"  💸 Нефіксований PnL: {p_change:+.2f}% (СЛ: {format_price(pair, trade['stop_loss'])} | ТП: {format_price(pair, trade['take_profit'])})")
+                print(f"    💸 Нефіксований PnL: {p_change:+.2f}% (СЛ: {format_price(pair, trade['stop_loss'])} | ТП: {format_price(pair, trade['take_profit'])})")
 
         # --------------------------------------------------------
         # КРОК 2: ПОШУК ТОЧОК ВХОДУ (ТІЛЬКИ LONG)
@@ -244,15 +254,14 @@ def run_scanner_cycle():
 
             if volume_spike and is_green_candle:
                 if overextended:
-                    print(f"  🙅‍♂️ [{pair}] Сигнал пропущено: свічка занадто розтягнута (Overextended).")
+                    print(f"    🙅‍♂️ Сигнал пропущено: свічка занадто розтягнута (Overextended).")
                 elif free_balance >= INVEST_PER_TRADE:
                     real_entry_price = current_price
                     executed_amount = INVEST_PER_TRADE / current_price 
 
                     if not DRY_RUN:
                         try:
-                            print(f"  📢 [РЕАЛ] Купівля {pair} на суму {INVEST_PER_TRADE} USDT...")
-                            # Специфіка маркет-ордерів купівлі WhiteBIT через CCXT
+                            print(f"    📢 [РЕАЛ] Купівля {pair} на суму {INVEST_PER_TRADE} USDT...")
                             order = exchange.create_order(pair, 'market', 'buy', amount=None, price=None, params={'cost': INVEST_PER_TRADE})
                             
                             if 'average' in order and order['average']:
@@ -265,9 +274,9 @@ def run_scanner_cycle():
                             else:
                                 executed_amount = INVEST_PER_TRADE / real_entry_price
                                 
-                            print(f"  ✅ [РЕАЛ] Ордер виконано. Куплено {executed_amount} монет по {format_price(pair, real_entry_price)}")
+                            print(f"    ✅ [РЕАЛ] Ордер виконано. Куплено {executed_amount} монет по {format_price(pair, real_entry_price)}")
                         except Exception as e:
-                            print(f"  ❌ [РЕАЛ] Не вдалося відкрити ордер купівлі: {e}")
+                            print(f"    ❌ [РЕАЛ] Не вдалося відкрити ордер купівлі: {e}")
                             continue
 
                     if DRY_RUN:
@@ -287,9 +296,11 @@ def run_scanner_cycle():
                         "status": "OPEN",
                         "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
-                    print(f"  🚀 Угоду зафіксовано в системі. ТП: {format_price(pair, tp)} | СЛ: {format_price(pair, sl)}")
+                    print(f"    🚀 Угоду зафіксовано в системі. ТП: {format_price(pair, tp)} | СЛ: {format_price(pair, sl)}")
                 else:
-                    print(f"  🙅‍♂️ Недостатньо балансу для входу (Вільний: {free_balance:.2f} USDT).")
+                    print(f"    🙅‍♂️ Недостатньо балансу для входу (Вільний: {free_balance:.2f} USDT).")
+            else:
+                print(f"    💤 Аномальних сплесків не виявлено.")
         print("-" * 30)
 
     save_data(data)
