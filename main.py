@@ -20,7 +20,11 @@ STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
 INVEST_PER_TRADE = 1.5      # Об'єм однієї угоди знижено до 1.5 USDT
 
+# ⚠️ РЕЖИМ ТЕСТУВАННЯ (DRY RUN)
+# True — віртуальні торги. False — РЕАЛЬНІ ТОРГИ на біржі!
 DRY_RUN = False 
+
+# ⚠️ ВСТАНОВІТЬ В True НА ОДИН ЗАПУСК, ЩОБ ПОВНІСТЮ ОЧИСТИТИ ІСТОРІЮ
 RESET_DATA = False 
 
 # ==========================================
@@ -31,11 +35,12 @@ exchange_config = {
     'secret': os.environ.get('WHITEBIT_SECRET_KEY', '4ff8480b5bb8914e4dacf7ac40401762'),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'margin' 
+        'defaultType': 'margin' # Стабільний режим для маржинального/торгового рахунку
     }
 }
 exchange = ccxt.whitebit(exchange_config)
 
+# Шляхи до бази даних (локально чи на Render)
 if os.path.exists("/data") or os.environ.get("RENDER"): 
     DB_DIR = "/data"
     os.makedirs(DB_DIR, exist_ok=True)
@@ -80,33 +85,49 @@ def save_data(data):
         csv_path = os.path.join(DB_DIR, "trades_history.csv")
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
+
+            # 1. ЗАГАЛЬНА СТАТИСТИКА
             writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
             writer.writerow(["Загальний капітал (Вільні + в угодах)", f"{total_equity:.2f} USDT"])
             writer.writerow(["Вільний баланс", f"{data.get('balance_usdt', 100.0):.2f} USDT"])
             writer.writerow(["Заморожено в угодах", f"{invested_now:.2f} USDT"])
-            writer.writerow([])
+            writer.writerow([]) 
 
+            # 2. АКТИВНІ УГОДИ
             writer.writerow(["АКТИВНІ УГОДИ"])
             active = data.get("active_trades", {})
             if active:
                 writer.writerow(["Пара", "Напрямок", "Ціна входу", "Інвестовано", "Take Profit", "Stop Loss", "Час відкриття"])
                 for pair, t in active.items():
                     writer.writerow([
-                        t.get("pair"), t.get("direction"), t.get("buy_price"), 
-                        t.get("invested_amount"), t.get("take_profit"), t.get("stop_loss"), t.get("open_time")
+                        t.get("pair"), 
+                        t.get("direction"), 
+                        format_price(pair, t.get("buy_price")), 
+                        f"{t.get('invested_amount'):.2f}", 
+                        format_price(pair, t.get("take_profit")), 
+                        format_price(pair, t.get("stop_loss")), 
+                        t.get("open_time")
                     ])
             else:
                 writer.writerow(["Немає активних угод"])
-            writer.writerow([])
+            writer.writerow([]) 
 
+            # 3. ІСТОРІЯ ЗАКРИТИХ УГОД
             writer.writerow(["ІСТОРІЯ ЗАКРИТИХ УГОД"])
             history = data.get("history", [])
             if history:
                 writer.writerow(["Пара", "Напрямок", "Ціна входу", "Ціна виходу", "Інвестовано", "Результат (PnL)", "Статус", "Час закриття"])
                 for t in history:
+                    pair = t.get("pair")
                     writer.writerow([
-                        t.get("pair"), t.get("direction"), t.get("buy_price"), t.get("exit_price"), 
-                        t.get("invested_amount"), f"{t.get('pnl', 0):+.2f}", t.get("status"), t.get("close_time")
+                        pair, 
+                        t.get("direction"), 
+                        format_price(pair, t.get("buy_price")), 
+                        format_price(pair, t.get("exit_price")), 
+                        f"{t.get('invested_amount'):.2f}", 
+                        f"{t.get('pnl', 0):+.2f}", 
+                        t.get("status"), 
+                        t.get("close_time")
                     ])
             else:
                 writer.writerow(["Історія порожня"])
@@ -121,7 +142,7 @@ def format_price(pair, price):
         if price < 1.0: return f"{price:.6f}".rstrip('0').rstrip('.')
         return f"{price:.2f}"
 
-# Захищена функція отримання балансу (стійка до 30-хвилинних таймаутів)
+# Захищена функція отримання балансу (стійка до 30-хвилинних таймаутів WhiteBIT)
 def fetch_safe_balance():
     for attempt in range(3):
         try:
@@ -137,7 +158,6 @@ def fetch_safe_balance():
 # ==========================================
 def run_scanner_cycle():
     data = load_data()
-    balances = None
 
     if not DRY_RUN:
         try:
@@ -234,20 +254,18 @@ def run_scanner_cycle():
                         print(f"  📢 [РЕАЛ] Надсилаю ордер на ЗАКРИТТЯ позиції {pair}...")
                         side = 'sell' if direction == "LONG" else 'buy'
                         
-                        # 💎 МОДЕРНІЗАЦІЯ ОБ'ЄМУ ЗАКРИТТЯ 💎
-                        # Опитуємо свіжий баланс перед закриттям, щоб дізнатися точну кількість монет
+                        # Перевіряємо точний баланс монети на біржі перед продажем
                         coin = pair.split('/')[0] if side == 'sell' else pair.split('/')[1]
                         fresh_balances = fetch_safe_balance()
                         available_coin = float(fresh_balances['free'].get(coin, 0.0))
 
                         if side == 'sell':
-                            # Якщо монет на біржі взагалі немає (продали руками)
                             if available_coin <= 0:
-                                print(f"  ⚠️ [РЕАЛ] Монети {coin} немає на балансі біржі. Чистимо локальну базу.")
+                                print(f"  ⚠️ [РЕАЛ] Монети {coin} немає на балансі біржі (можливо, продано руками). Очищую базу.")
                                 del data["active_trades"][pair]
                                 continue
                             
-                            # Беремо або розраховане, або те, що реально є (щоб не було "Not enough balance")
+                            # Беремо мінімальне значення між математичним об'ємом та реальним доступним залишком
                             amount_to_close = min(invested / p_in, available_coin)
                         else:
                             amount_to_close = INVEST_PER_TRADE / current_price
@@ -262,7 +280,7 @@ def run_scanner_cycle():
                             exit_p = float(order['average'])
                         print(f"  ✅ [РЕАЛ] Ордер виконано по ціні: {format_price(pair, exit_p)}")
                     except Exception as e:
-                        print(f"  ❌ [РЕАЛ] Помилка виконання ордера закриття: {e}. Переносимо спробу на наступний тік.")
+                        print(f"  ❌ [РЕАЛ] Помилка виконання ордера закриття: {e}. Спроба переноситься.")
                         continue
 
                 if direction == "LONG":
