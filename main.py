@@ -3,7 +3,9 @@ import json
 import os
 import time
 import csv
+import random
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN
 
 # ==========================================
 # НАЛАШТУВАННЯ СКАНЕРА & БІРЖІ
@@ -16,30 +18,24 @@ SCAN_MARKETS = [
 TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
 STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
-INVEST_PER_TRADE = 1.5      # 🔥 Об'єм однієї угоди знижено до 1.5 USDT
+INVEST_PER_TRADE = 1.5      # Об'єм однієї угоди знижено до 1.5 USDT
 
-# ⚠️ РЕЖИМ ТЕСТУВАННЯ (DRY RUN)
-# True — віртуальні торги (симуляція з реальними цінами). 
-# False — РЕАЛЬНІ ТОРГИ на біржі за твоїми ключами!
 DRY_RUN = False 
-
-# ⚠️ ВСТАНОВІТЬ В True НА ОДИН ЗАПУСК, ЩОБ ПОВНІСТЮ ОЧИСТИТИ ІСТОРІЮ І ПОЧАТИ ЗО 100$
 RESET_DATA = False 
 
 # ==========================================
-# ІНІЦІАЛІЗАЦІЯ API (Ключі прописані)
+# ІНІЦІАЛІЗАЦІЯ API
 # ==========================================
 exchange_config = {
     'apiKey': os.environ.get('WHITEBIT_API_KEY', '9dfcbc7d6c30802daf10d0bb50bf50d1'),
     'secret': os.environ.get('WHITEBIT_SECRET_KEY', '4ff8480b5bb8914e4dacf7ac40401762'),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'margin' # Залишаємо стабільний режим, який не видає помилок мережі
+        'defaultType': 'margin' 
     }
 }
 exchange = ccxt.whitebit(exchange_config)
 
-# Шляхи до бази даних
 if os.path.exists("/data") or os.environ.get("RENDER"): 
     DB_DIR = "/data"
     os.makedirs(DB_DIR, exist_ok=True)
@@ -84,7 +80,6 @@ def save_data(data):
         csv_path = os.path.join(DB_DIR, "trades_history.csv")
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
-
             writer.writerow(["ЗАГАЛЬНА СТАТИСТИКА"])
             writer.writerow(["Загальний капітал (Вільні + в угодах)", f"{total_equity:.2f} USDT"])
             writer.writerow(["Вільний баланс", f"{data.get('balance_usdt', 100.0):.2f} USDT"])
@@ -126,15 +121,27 @@ def format_price(pair, price):
         if price < 1.0: return f"{price:.6f}".rstrip('0').rstrip('.')
         return f"{price:.2f}"
 
+# Захищена функція отримання балансу (стійка до 30-хвилинних таймаутів)
+def fetch_safe_balance():
+    for attempt in range(3):
+        try:
+            return exchange.fetch_balance()
+        except Exception as e:
+            if attempt == 2:
+                raise e
+            wait_time = 1 + random.uniform(0.5, 1.5)
+            time.sleep(wait_time)
+
 # ==========================================
 # ОДИН ЦИКЛ СКАНУВАННЯ
 # ==========================================
 def run_scanner_cycle():
     data = load_data()
+    balances = None
 
     if not DRY_RUN:
         try:
-            balances = exchange.fetch_balance()
+            balances = fetch_safe_balance()
             data["balance_usdt"] = float(balances['free'].get('USDT', 0.0))
         except Exception as e:
             print(f"❌ Не вдалося отримати реальний баланс з біржі: {e}")
@@ -226,7 +233,25 @@ def run_scanner_cycle():
                     try:
                         print(f"  📢 [РЕАЛ] Надсилаю ордер на ЗАКРИТТЯ позиції {pair}...")
                         side = 'sell' if direction == "LONG" else 'buy'
-                        amount_to_close = invested / p_in 
+                        
+                        # 💎 МОДЕРНІЗАЦІЯ ОБ'ЄМУ ЗАКРИТТЯ 💎
+                        # Опитуємо свіжий баланс перед закриттям, щоб дізнатися точну кількість монет
+                        coin = pair.split('/')[0] if side == 'sell' else pair.split('/')[1]
+                        fresh_balances = fetch_safe_balance()
+                        available_coin = float(fresh_balances['free'].get(coin, 0.0))
+
+                        if side == 'sell':
+                            # Якщо монет на біржі взагалі немає (продали руками)
+                            if available_coin <= 0:
+                                print(f"  ⚠️ [РЕАЛ] Монети {coin} немає на балансі біржі. Чистимо локальну базу.")
+                                del data["active_trades"][pair]
+                                continue
+                            
+                            # Беремо або розраховане, або те, що реально є (щоб не було "Not enough balance")
+                            amount_to_close = min(invested / p_in, available_coin)
+                        else:
+                            amount_to_close = INVEST_PER_TRADE / current_price
+
                         formatted_amount = exchange.amount_to_precision(pair, amount_to_close)
 
                         order = exchange.create_order(pair, 'market', side, formatted_amount)
