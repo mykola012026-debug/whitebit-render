@@ -440,3 +440,4 @@ if __name__ == "__main__":
 
         if now.minute not in [0, 15, 30, 45]:
             last_processed_
+ time.sleep(0.5)
