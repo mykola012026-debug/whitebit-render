@@ -223,7 +223,6 @@ def run_scanner_cycle():
             reason = ""
 
             if DRY_RUN:
-                # В режимі тесту перевіряємо по хай/лоу свічки вручну
                 if direction == "LONG":
                     if market["current_low"] <= trade["stop_loss"]:
                         exit_p = trade["stop_loss"]
@@ -243,12 +242,10 @@ def run_scanner_cycle():
                         closed = True
                         reason = "TAKE_PROFIT 🟢"
             else:
-                # 🔥 LIVE РЕЖИМ: Перевіряємо, чи спрацювали наші ордери на самій біржі
                 try:
-                    # Перевіряємо статус ордера Stop-Loss
                     sl_order_id = trade.get("sl_order_id")
                     tp_order_id = trade.get("tp_order_id")
-                    
+
                     sl_status = exchange.fetch_order(sl_order_id, pair) if sl_order_id else {'status': 'open'}
                     tp_status = exchange.fetch_order(tp_order_id, pair) if tp_order_id else {'status': 'open'}
 
@@ -256,7 +253,6 @@ def run_scanner_cycle():
                         exit_p = float(sl_status.get('average', sl_status.get('price', trade["stop_loss"])))
                         closed = True
                         reason = "STOP_LOSS 🔴 (БІРЖА)"
-                        # Скасовуємо тейк-профіт, який залишився
                         if tp_order_id: 
                             try: exchange.cancel_order(tp_order_id, pair)
                             except: pass
@@ -265,14 +261,12 @@ def run_scanner_cycle():
                         exit_p = float(tp_status.get('average', tp_status.get('price', trade["take_profit"])))
                         closed = True
                         reason = "TAKE_PROFIT 🟢 (БІРЖА)"
-                        # Скасовуємо стоп-лосс, який залишився
                         if sl_order_id: 
                             try: exchange.cancel_order(sl_order_id, pair)
                             except: pass
-                            
+
                 except Exception as e:
                     print(f"  ⚠️ Помилка перевірки статусів ордерів на біржі: {e}")
-                    # Фолбек на випадок збою API перевірки ордерів (залишаємо ручну математику свічки)
                     if direction == "LONG" and market["current_low"] <= trade["stop_loss"]:
                         exit_p = trade["stop_loss"]; closed = True; reason = "STOP_LOSS 🔴 (ФОЛБЕК)"
                     elif direction == "LONG" and market["current_high"] >= trade["take_profit"]:
@@ -335,7 +329,6 @@ def run_scanner_cycle():
                             amount_to_buy = INVEST_PER_TRADE / current_price
                             formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
 
-                            # 1. Вхід в ринок
                             order = exchange.create_order(pair, 'market', side, formatted_amount)
 
                             if 'price' in order and order['price']:
@@ -344,7 +337,6 @@ def run_scanner_cycle():
                                 real_entry_price = float(order['average'])
                             print(f"  ✅ [РЕАЛ] Маркет-ордер виконано по: {format_price(pair, real_entry_price)} USDT")
 
-                            # Розрахунок рівнів
                             if direction == "LONG":
                                 tp = real_entry_price * (1 + TAKE_PROFIT_PCT)
                                 sl = real_entry_price * (1 - STOP_LOSS_PCT)
@@ -354,7 +346,6 @@ def run_scanner_cycle():
                                 sl = real_entry_price * (1 + STOP_LOSS_PCT)
                                 trigger_side = 'buy'
 
-                            # 2. Виставлення STOP-LOSS ордера на біржу
                             try:
                                 sl_params = {
                                     'stopPrice': exchange.price_to_precision(pair, sl),
@@ -366,7 +357,6 @@ def run_scanner_cycle():
                             except Exception as e_sl:
                                 print(f"  ⚠️ Не вдалося виставити автоматичний Stop-Loss: {e_sl}")
 
-                            # 3. Виставлення TAKE-PROFIT ордера на біржу
                             try:
                                 tp_params = {
                                     'stopPrice': exchange.price_to_precision(pair, tp),
@@ -382,7 +372,6 @@ def run_scanner_cycle():
                             print(f"  ❌ [РЕАЛ] Не вдалося відкрити позицію: {e}")
                             continue
                     else:
-                        # Для DRY_RUN просто математично вираховуємо рівні
                         if direction == "LONG":
                             tp = real_entry_price * (1 + TAKE_PROFIT_PCT)
                             sl = real_entry_price * (1 - STOP_LOSS_PCT)
@@ -410,7 +399,7 @@ def run_scanner_cycle():
                 print(f"  💤 Аномальних сплесків не виявлено.")
         print("-" * 30)
 
-    支配 = save_data(data)
+    save_data(data)
 
 # ==========================================
 # ГОЛОВНИЙ ЦИКЛ СТАРТУ
@@ -439,5 +428,6 @@ if __name__ == "__main__":
                     print(f"⚠️ Критична помилка в циклі: {e}")
 
         if now.minute not in [0, 15, 30, 45]:
-            last_processed_
- time.sleep(0.5)
+            last_processed_minute = -1
+
+        time.sleep(0.5)
