@@ -1,3 +1,4 @@
+
 import ccxt
 import json
 import os
@@ -425,7 +426,12 @@ if __name__ == "__main__":
         print("✅ Ф'ючерсні ринки завантажено успішно. Бот готовий до роботи.")
     except Exception as e:
         print(f"⚠️ Не вдалося завантажити специфікації ринків: {e}")
+print(f"⚠️ Критична помилка в циклі: {e}")
 
+        if now.minute not in [0, 15, 30, 45]:
+            last_processed_minute = -1
+
+        time.sleep(0.5)
     last_processed_minute = -1
 
     while True:
