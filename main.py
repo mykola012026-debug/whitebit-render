@@ -11,7 +11,7 @@ from datetime import datetime
 # ==========================================
 SCAN_MARKETS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "FET/USDT", 
-    "ONDO/USDT", "NEAR/USDT", "SUI/USDT"
+    "ONDO/USDT", "NEAR/USDT", "SUI/USDT", "RENDER/USDT", "LINK/USDT"
 ]
 
 TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
