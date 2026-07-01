@@ -9,7 +9,6 @@ from datetime import datetime
 # ==========================================
 # НАЛАШТУВАННЯ СКАНЕРА & БІРЖІ (Ф'ЮЧЕРСИ)
 # ==========================================
-# Пари переведені у ф'ючерсний формат CCXT (додано :USDT)
 SCAN_MARKETS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "FET/USDT:USDT", 
     "ONDO/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "RENDER/USDT:USDT", "LINK/USDT:USDT"
@@ -19,13 +18,10 @@ TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
 STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
 
-# 👈 Встановлюємо 5.5 USDT, щоб гарантовано проходити мінімальний ліміт ордера на WhiteBIT ($5)
+# 👈 Мінімалка $5.5, щоб чітко проходити ліміт WhiteBIT ($5)
 INVEST_PER_TRADE = 5.5      
 
-# ⚠️ РЕЖИМ ТЕСТУВАННЯ (DRY RUN) -> Постав False для реальних торгів
 DRY_RUN = False 
-
-# ⚠️ ВСТАНОВІТЬ В True НА ОДИН ЗАПУСК, ЩОБ ПОВНІСТЮ ОЧИСТИТИ ІСТОРІЮ
 RESET_DATA = False 
 
 # ==========================================
@@ -36,13 +32,12 @@ exchange_config = {
     'secret': os.environ.get('WHITEBIT_SECRET_KEY', '4ff8480b5bb8914e4dacf7ac40401762'),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'futures',      # 👈 Перемикаємося на ф'ючерси
-        'account-level': 'collateral'  # 👈 Працюємо із Заставним балансом
+        'defaultType': 'futures',      
+        'account-level': 'collateral'  
     }
 }
 exchange = ccxt.whitebit(exchange_config)
 
-# Шляхи до бази даних (локально чи на Render)
 if os.path.exists("/data") or os.environ.get("RENDER"): 
     DB_DIR = "/data"
     os.makedirs(DB_DIR, exist_ok=True)
@@ -160,7 +155,6 @@ def run_scanner_cycle():
     if not DRY_RUN:
         try:
             balances = fetch_safe_balance()
-            # Для 'futures' CCXT підтягує вільний баланс із Заставного рахунку
             data["balance_usdt"] = float(balances['free'].get('USDT', 0.0))
         except Exception as e:
             print(f"❌ Не вдалося отримати реальний баланс з біржі: {e}")
@@ -332,11 +326,11 @@ def run_scanner_cycle():
                             print(f"  📢 [РЕАЛ] Відкриваю ф'ючерсний {direction} ордер на {pair}...")
                             side = 'buy' if direction == "LONG" else 'sell'
 
-                            # Розрахунок кількості контракту під $5.5 позиції
+                            # Важливо: обов'язково округлюємо кількість контракту під специфікацію кроку пари!
                             amount_to_buy = INVEST_PER_TRADE / current_price
                             formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
 
-                            # Відправка маркет-ордера на ф'ючерси
+                            # Відправка основного маркет-ордера
                             order = exchange.create_order(pair, 'market', side, formatted_amount)
 
                             if 'price' in order and order['price']:
@@ -345,7 +339,7 @@ def run_scanner_cycle():
                                 real_entry_price = float(order['average'])
                             print(f"  ✅ [РЕАЛ] Ордер виконано по: {format_price(pair, real_entry_price)} USDT")
 
-                            # Розрахунок рівнів ТП / СЛ
+                            # Розрахунок ТП / СЛ
                             if direction == "LONG":
                                 tp = real_entry_price * (1 + TAKE_PROFIT_PCT)
                                 sl = real_entry_price * (1 - STOP_LOSS_PCT)
@@ -355,23 +349,24 @@ def run_scanner_cycle():
                                 sl = real_entry_price * (1 + STOP_LOSS_PCT)
                                 trigger_side = 'buy'
 
-                            # Виставлення Стоп-Лоссу на біржі
+                            # 🛡️ Виставлення Stop-Loss ордера на ф'ючерсах
                             try:
                                 sl_params = {
                                     'stopPrice': exchange.price_to_precision(pair, sl),
-                                    'type': 'stopMarket'
+                                    'reduceOnly': True
                                 }
+                                # Для WhiteBIT правильний тип стопу в CCXT — 'stopMarket'
                                 sl_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, sl_params)
                                 sl_order_id = sl_order.get('id')
                                 print(f"  🛡️ [БІРЖА] Stop-Loss виставлено на рівні {format_price(pair, sl)}")
                             except Exception as e_sl:
                                 print(f"  ⚠️ Не вдалося виставити автоматичний Stop-Loss: {e_sl}")
 
-                            # Виставлення Тейк-Профіту на біржі
+                            # 🎯 Виставлення Take-Profit ордера на ф'ючерсах
                             try:
                                 tp_params = {
                                     'stopPrice': exchange.price_to_precision(pair, tp),
-                                    'type': 'stopMarket'
+                                    'reduceOnly': True
                                 }
                                 tp_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, tp_params)
                                 tp_order_id = tp_order.get('id')
@@ -405,7 +400,7 @@ def run_scanner_cycle():
                         "tp_order_id": tp_order_id
                     }
                 else:
-                    print(f"  🙅‍♂️ Недостатньо вільної застави на балансі для ф'ючерсного ордера (Вільний: {free_balance:.2f} USDT).")
+                    print(f"  🙅‍♂️ Недостатньо вільної застави на балансі (Вільний: {free_balance:.2f} USDT).")
             else:
                 print(f"  💤 Аномальних сплесків не виявлено.")
         print("-" * 30)
@@ -432,17 +427,15 @@ if __name__ == "__main__":
 
         # Тригер на кожні 15 хвилин свічки (00, 15, 30, 45)
         if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
-            if now.second >= 2: # Невеликий лаг на закриття свічки біржею
+            if now.second >= 2: 
                 last_processed_minute = now.minute
                 try:
                     run_scanner_cycle()
                 except Exception as e:
                     print(f"⚠️ Критична помилка в циклі: {e}")
 
-        # Скидаємо тригер хвилини, коли вийшли з точок сканування (00, 15, 30, 45)
+        # Скидаємо тригер хвилини, коли вийшли з точок сканування
         if now.minute not in [0, 15, 30, 45]:
             last_processed_minute = -1
 
-        # Невелика пауза, щоб бот не перевантажував процесор у порожньому циклі
         time.sleep(0.5)
- 
