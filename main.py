@@ -6,20 +6,20 @@ import csv
 import random
 from datetime import datetime
 
+# --- НАЛАШТУВАННЯ СКАНЕРА & РИЗИКІВ ---
 SCAN_MARKETS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "FET/USDT:USDT", 
     "ONDO/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "RENDER/USDT:USDT", "LINK/USDT:USDT"
 ]
-
 TAKE_PROFIT_PCT = 0.03      
 STOP_LOSS_PCT = 0.015       
 VOLUME_MULTIPLIER = 2.5     
 INVEST_PER_TRADE = 5.5      
 LEVERAGE = 20
-
 DRY_RUN = False 
 RESET_DATA = False
 
+# --- ІНІЦІАЛІЗАЦІЯ API ВІД WHITEBIT ---
 exchange_config = {
     'apiKey': os.environ.get('WHITEBIT_API_KEY', '9dfcbc7d6c30802daf10d0bb50bf50d1'),
     'secret': os.environ.get('WHITEBIT_SECRET_KEY', '4ff8480b5bb8914e4dacf7ac40401762'),
@@ -31,6 +31,7 @@ exchange_config = {
 }
 exchange = ccxt.whitebit(exchange_config)
 
+# --- РОБОТА З ЛОКАЛЬНОЮ БАЗОЮ ДАНИХ ---
 DB_DIR = "/data" if (os.path.exists("/data") or os.environ.get("RENDER")) else "."
 os.makedirs(DB_DIR, exist_ok=True)
 DB_FILE = os.path.join(DB_DIR, "virtual_portfolio.json")
@@ -92,10 +93,9 @@ def format_price(pair, price):
 def fetch_safe_balance():
     for attempt in range(3):
         try: return exchange.fetch_balance()
-        except Exception as e:
-            if attempt == 2: raise e
-            time.sleep(1 + random.uniform(0.5, 1.5))
+        except: time.sleep(1 + random.uniform(0.5, 1.5))
 
+# --- ОСНОВНИЙ МОДУЛЬ АНАЛІЗУ ТА ТОРГІВЛІ ---
 def run_scanner_cycle():
     data = load_data()
     if not DRY_RUN:
@@ -134,6 +134,7 @@ def run_scanner_cycle():
             }
         except: continue
 
+        # --- БЛОК 1: МОНІТОРИНГ ВЖЕ ВІДКРИТИХ ПОЗИЦІЙ ---
         if pair in data["active_trades"]:
             trade = data["active_trades"][pair]
             direction = trade.get("direction", "LONG")
@@ -153,14 +154,17 @@ def run_scanner_cycle():
                     sl_id, tp_id = trade.get("sl_order_id"), trade.get("tp_order_id")
                     sl_status = exchange.fetch_order(sl_id, pair) if sl_id else {'status': 'open'}
                     tp_status = exchange.fetch_order(tp_id, pair) if tp_id else {'status': 'open'}
+                    
                     if sl_status['status'] == 'closed':
                         exit_p, closed, reason = float(sl_status.get('average', trade["stop_loss"])), True, "STOP_LOSS 🔴 (БІРЖА)"
-                        if tp_id: try: exchange.cancel_order(tp_id, pair)
-                        except: pass
+                        if tp_id:
+                            try: exchange.cancel_order(tp_id, pair)
+                            except: pass
                     elif tp_status['status'] == 'closed':
                         exit_p, closed, reason = float(tp_status.get('average', trade["take_profit"])), True, "TAKE_PROFIT 🟢 (БІРЖА)"
-                        if sl_id: try: exchange.cancel_order(sl_id, pair)
-                        except: pass
+                        if sl_id:
+                            try: exchange.cancel_order(sl_id, pair)
+                            except: pass
                 except:
                     if direction == "LONG" and market["current_low"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴 (ФОЛБЕК)"
                     elif direction == "LONG" and market["current_high"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢 (ФОЛБЕК)"
@@ -175,6 +179,7 @@ def run_scanner_cycle():
                 del data["active_trades"][pair]
                 print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
 
+        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА СТВОРЕННЯ ОРДЕРІВ ---
         else:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
@@ -241,6 +246,7 @@ def run_scanner_cycle():
                 }
     save_data(data)
 
+# --- БЛОК 3: ТАЙМЕР ТА ЦИКЛ ЗАПУСКУ ---
 if __name__ == "__main__":
     print("🤖 Бот запущенний.")
     try: exchange.load_markets()
