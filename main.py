@@ -173,7 +173,7 @@ def run_scanner_cycle():
     print(f"\n⚡ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Скан аномалій (15m)... Режим: {'🤖 ТЕСТ (DRY_RUN)' if DRY_RUN else '🔥 РЕАЛ (LIVE)'}")
     print(f"💰 ЗАГАЛЬНИЙ КАПІТАЛ: {total_equity:.2f} USDT (В угодах: {invested_amount:.2f} USDT)")
     print(f"💵 Вільний баланс: {data['balance_usdt']:.2f} USDT")
-    print(f"📊 : {active_count} із {len(SCAN_MARKETS)}")
+    print(f"📊 Позицій: {active_count} із {len(SCAN_MARKETS)}")
     print("-" * 50)
 
     for pair in SCAN_MARKETS:
@@ -319,7 +319,6 @@ def run_scanner_cycle():
             if volume_spike:
                 if overextended:
                     print(f"  🙅‍♂️ Сигнал пропущено: свічка занадто розтягнута (Overextended).")
-                # Для ф'ючерсів з плечем застава менша, але ми перевіряємо наявність базової суми
                 elif free_balance >= 2.0: 
                     ratio = current_volume / avg_volume
                     direction = "LONG" if is_green_candle else "SHORT"
@@ -332,7 +331,7 @@ def run_scanner_cycle():
                         try:
                             print(f"  📢 [РЕАЛ] Відкриваю ф'ючерсний {direction} ордер на {pair}...")
                             side = 'buy' if direction == "LONG" else 'sell'
-                            
+
                             # Розрахунок кількості контракту під $5.5 позиції
                             amount_to_buy = INVEST_PER_TRADE / current_price
                             formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
@@ -425,27 +424,19 @@ if __name__ == "__main__":
         print("✅ Ф'ючерсні ринки завантажено успішно. Бот готовий до роботи.")
     except Exception as e:
         print(f"⚠️ Не вдалося завантажити специфікації ринків: {e}")
-print(f"⚠️ Критична помилка в циклі: {e}")
 
-        if now.minute not in [0, 15, 30, 45]:
-            last_processed_minute = -1
-
-        time.sleep(0.5)
     last_processed_minute = -1
 
     while True:
         now = datetime.now()
 
-        # Тригер на кожні 15 хвилин свічки
+        # Тригер на кожні 15 хвилин свічки (00, 15, 30, 45)
         if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
             if now.second >= 2: # Невеликий лаг на закриття свічки біржею
                 last_processed_minute = now.minute
                 try:
                     run_scanner_cycle()
                 except Exception as e:
-                  print(f"⚠️ Критична помилка в циклі: {e}")
+                    print(f"⚠️ Критична помилка в циклі: {e}")
 
-        if now.minute not in [0, 15, 30, 45]:
-            last_processed_minute = -1
-
-        time.sleep(0.5)
+        # Скидаємо тригер хвилини, коли 
