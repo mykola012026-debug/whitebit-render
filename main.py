@@ -18,7 +18,6 @@ TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
 STOP_LOSS_PCT = 0.015       # Захист: -1.5%
 VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
 
-# 👈 Мінімалка $5.5, щоб чітко проходити ліміт WhiteBIT ($5)
 INVEST_PER_TRADE = 5.5      
 
 DRY_RUN = False 
@@ -326,17 +325,24 @@ def run_scanner_cycle():
                             print(f"  📢 [РЕАЛ] Відкриваю ф'ючерсний {direction} ордер на {pair}...")
                             side = 'buy' if direction == "LONG" else 'sell'
 
-                            # Важливо: обов'язково округлюємо кількість контракту під специфікацію кроку пари!
                             amount_to_buy = INVEST_PER_TRADE / current_price
                             formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
 
                             # Відправка основного маркет-ордера
                             order = exchange.create_order(pair, 'market', side, formatted_amount)
 
-                            if 'price' in order and order['price']:
+                            # 🔥 FIX 1: WhiteBIT повертає ціну виконання у 'price' або 'trades'. 
+                            # Якщо ордер ринковий, поле order['price'] часто порожнє (або дорівнює 0), 
+                            # а CCXT підставляє туди дивні речі. Беремо ціну з фактичних трейдів, якщо вона там є.
+                            if 'trades' in order and order['trades'] and len(order['trades']) > 0:
+                                real_entry_price = float(order['trades'][0].get('price', current_price))
+                            elif 'price' in order and order['price'] and float(order['price']) > 0:
                                 real_entry_price = float(order['price'])
-                            elif 'average' in order and order['average']:
+                            elif 'average' in order and order['average'] and float(order['average']) > 0:
                                 real_entry_price = float(order['average'])
+                            else:
+                                real_entry_price = current_price # Фолбек на поточну ціну свічки, щоб не отримати $7481
+
                             print(f"  ✅ [РЕАЛ] Ордер виконано по: {format_price(pair, real_entry_price)} USDT")
 
                             # Розрахунок ТП / СЛ
@@ -351,11 +357,14 @@ def run_scanner_cycle():
 
                             # 🛡️ Виставлення Stop-Loss ордера на ф'ючерсах
                             try:
+                                # 🔥 FIX 2: Для WhiteBIT у полі 'stopPrice' передається ціна активації.
+                                # Також додаємо параметр 'activationPrice' всередину params для надійності API.
+                                formatted_sl = exchange.price_to_precision(pair, sl)
                                 sl_params = {
-                                    'stopPrice': exchange.price_to_precision(pair, sl),
+                                    'stopPrice': formatted_sl,
+                                    'activationPrice': formatted_sl, 
                                     'reduceOnly': True
                                 }
-                                # Для WhiteBIT правильний тип стопу в CCXT — 'stopMarket'
                                 sl_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, sl_params)
                                 sl_order_id = sl_order.get('id')
                                 print(f"  🛡️ [БІРЖА] Stop-Loss виставлено на рівні {format_price(pair, sl)}")
@@ -364,8 +373,11 @@ def run_scanner_cycle():
 
                             # 🎯 Виставлення Take-Profit ордера на ф'ючерсах
                             try:
+                                # 🔥 FIX 3: Те саме для Take-Profit
+                                formatted_tp = exchange.price_to_precision(pair, tp)
                                 tp_params = {
-                                    'stopPrice': exchange.price_to_precision(pair, tp),
+                                    'stopPrice': formatted_tp,
+                                    'activationPrice': formatted_tp,
                                     'reduceOnly': True
                                 }
                                 tp_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, tp_params)
@@ -373,6 +385,18 @@ def run_scanner_cycle():
                                 print(f"  🎯 [БІРЖА] Take-Profit виставлено на рівні {format_price(pair, tp)}")
                             except Exception as e_tp:
                                 print(f"  ⚠️ Не вдалося виставити автоматичний Take-Profit: {e_tp}")
+
+                            # 🔥 FIX 4: Страховка. Якщо не виставився хоча б один захисний ордер (SL або TP)
+                            # ми НЕ ЗАЛИШАЄМО позицію відкритою, а негайно закриваємо її по ринку!
+                            if not DRY_RUN and (not sl_order_id or not tp_order_id):
+                                print(f"  🚨 КРИТИЧНО: Стопи не виставлені! Терміново ліквідую відкриту позицію...")
+                                close_side = 'sell' if direction == "LONG" else 'buy'
+                                try:
+                                    exchange.create_order(pair, 'market', close_side, formatted_amount)
+                                    print(f"  🚨 Позицію успішно ліквідовано для безпеки капіталу.")
+                                except Exception as e_close:
+                                    print(f"  ❌ Не вдалося екстрено закрити позицію: {e_close}")
+                                continue
 
                         except Exception as e:
                             print(f"  ❌ [РЕАЛ] Не вдалося відкрити позицію: {e}")
@@ -391,51 +415,4 @@ def run_scanner_cycle():
                         "pair": pair,
                         "direction": direction,
                         "buy_price": real_entry_price,
-                        "invested_amount": INVEST_PER_TRADE,
-                        "take_profit": tp,
-                        "stop_loss": sl,
-                        "status": "OPEN",
-                        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "sl_order_id": sl_order_id,
-                        "tp_order_id": tp_order_id
-                    }
-                else:
-                    print(f"  🙅‍♂️ Недостатньо вільної застави на балансі (Вільний: {free_balance:.2f} USDT).")
-            else:
-                print(f"  💤 Аномальних сплесків не виявлено.")
-        print("-" * 30)
-
-    save_data(data)
-
-# ==========================================
-# ГОЛОВНИЙ ЦИКЛ СТАРТУ
-# ==========================================
-if __name__ == "__main__":
-    print("🤖 Автономний Бот-Снайпер 15m для Ф'ЮЧЕРСІВ запустився!")
-
-    try:
-        print("📦 Завантаження ринкових специфікацій з WhiteBIT...")
-        exchange.load_markets()
-        print("✅ Ф'ючерсні ринки завантажено успішно. Бот готовий до роботи.")
-    except Exception as e:
-        print(f"⚠️ Не вдалося завантажити специфікації ринків: {e}")
-
-    last_processed_minute = -1
-
-    while True:
-        now = datetime.now()
-
-        # Тригер на кожні 15 хвилин свічки (00, 15, 30, 45)
-        if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
-            if now.second >= 2: 
-                last_processed_minute = now.minute
-                try:
-                    run_scanner_cycle()
-                except Exception as e:
-                    print(f"⚠️ Критична помилка в циклі: {e}")
-
-        # Скидаємо тригер хвилини, коли вийшли з точок сканування
-        if now.minute not in [0, 15, 30, 45]:
-            last_processed_minute = -1
-
-        time.sleep(0.5)
+                        "invested_amount":
