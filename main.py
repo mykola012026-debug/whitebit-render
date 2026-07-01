@@ -300,6 +300,8 @@ def run_scanner_cycle():
         # --------------------------------------------------------
         # КРОК 2: ПОШУК ТОЧОК ВХОДУ (ЛОНГ / ШОРТ Ф'ЮЧЕРСИ)
         # --------------------------------------------------------
+# КРОК 2: ПОШУК ТОЧОК ВХОДУ (ЛОНГ / ШОРТ Ф'ЮЧЕРСИ)
+        # --------------------------------------------------------
         else:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
@@ -415,4 +417,50 @@ def run_scanner_cycle():
                         "pair": pair,
                         "direction": direction,
                         "buy_price": real_entry_price,
-                        "invested_amount":
+                        "invested_amount": INVEST_PER_TRADE,
+                        "take_profit": tp,
+                        "stop_loss": sl,
+                        "status": "OPEN",
+                        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "sl_order_id": sl_order_id,
+                        "tp_order_id": tp_order_id
+                    }
+                else:
+                    print(f"  🙅‍♂️ Недостатньо вільної застави на балансі (Вільний: {free_balance:.2f} USDT).")
+            else:
+                print(f"  💤 Аномальних сплесків не виявлено.")
+        print("-" * 30)
+
+    save_data(data)
+
+# ==========================================
+# ГОЛОВНИЙ ЦИКЛ СТАРТУ
+# ==========================================
+if __name__ == "__main__":
+    print("🤖 Автономний Бот-Снайпер 15m для Ф'ЮЧЕРСІВ запустився!")
+
+    try:
+        print("📦 Завантаження ринкових специфікацій з WhiteBIT...")
+        exchange.load_markets()
+        print("✅ Ф'ючерсні ринки завантажено успішно. Бот готовий до роботи.")
+    except Exception as e:
+        print(f"⚠️ Не вдалося завантажити специфікації ринків: {e}")
+
+    last_processed_minute = -1
+
+    while True:
+        now = datetime.now()
+
+        if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
+            if now.second >= 2: 
+                last_processed_minute = now.minute
+                try:
+                    run_scanner_cycle()
+                except Exception as e:
+                    print(f"⚠️ Критична помилка в циклі: {e}")
+
+        if now.minute not in [0, 15, 30, 45]:
+            last_processed_minute = -1
+
+        time.sleep(0.5)
+
