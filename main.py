@@ -1,4 +1,3 @@
-
 import ccxt
 import json
 import os
