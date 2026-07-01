@@ -444,4 +444,9 @@ print(f"⚠️ Критична помилка в циклі: {e}")
                 try:
                     run_scanner_cycle()
                 except Exception as e:
-  
+                  print(f"⚠️ Критична помилка в циклі: {e}")
+
+        if now.minute not in [0, 15, 30, 45]:
+            last_processed_minute = -1
+
+        time.sleep(0.5)
