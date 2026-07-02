@@ -118,7 +118,7 @@ def run_scanner_cycle():
                 if p_size > 0:
                     real_active_positions[pos['symbol']] = pos
         except Exception as e:
-            print(f"  ⚠️ Не вдалося отримати загальний список позицій з біржі: {e}")
+            print(f"  ⚠️ Не вдалося отримати список позицій з біржі: {e}")
 
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
@@ -162,10 +162,10 @@ def run_scanner_cycle():
         if pair.startswith("SOL") and market["open_price"] > 700:
             for key in ["open_price", "close_price", "current_low", "current_high"]: market[key] /= 100.0
 
-        # --- БЛОК 1: МОНІТОРИНГ ВЖЕ ВІДКРИТИХ ПОЗИЦІЙ (АЛГОРИТМІЧНИЙ) ---
+        # --- БЛОК 1: МОНІТОРИНГ АКТИВНОЇ ПОЗИЦІЇ (АЛГОРИТМІЧНИЙ ВИХІД) ---
         if real_position_exists or (DRY_RUN and pair in data["active_trades"]):
             if not DRY_RUN and pair not in data["active_trades"] and real_pos_data:
-                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Відновлюємо позицію по {pair} в локальній базі...")
+                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Відновлюємо дані по {pair} в базі...")
                 r_entry = float(real_pos_data.get('entryPrice') or current_price)
                 if pair.startswith("BTC") and r_entry > 500000: r_entry /= 100.0
                 if pair.startswith("ETH") and r_entry > 15000: r_entry /= 100.0
@@ -176,8 +176,8 @@ def run_scanner_cycle():
                     "direction": "LONG" if real_pos_data.get('side') == 'long' else "SHORT",
                     "buy_price": r_entry,
                     "invested_amount": INVEST_PER_TRADE, 
-                    "take_profit": r_entry * (1 + TAKE_PROFIT_PCT), 
-                    "stop_loss": r_entry * (1 - STOP_LOSS_PCT),
+                    "take_profit": r_entry * (1 + TAKE_PROFIT_PCT if real_pos_data.get('side') == 'long' else 1 - TAKE_PROFIT_PCT), 
+                    "stop_loss": r_entry * (1 - STOP_LOSS_PCT if real_pos_data.get('side') == 'long' else 1 + STOP_LOSS_PCT),
                     "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
 
@@ -187,13 +187,12 @@ def run_scanner_cycle():
             invested = trade["invested_amount"]
             closed, exit_p, reason = False, current_price, ""
 
-            # Бот сам відслідковує ціну та страхує угоду алгоритмом
             if direction == "LONG":
                 if market["current_low"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴"
                 elif market["current_high"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢"
             else:
-                if market["current_high"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴"
-                elif market["current_low"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢"
+                if market["current_high"] >= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴"
+                elif market["current_low"] <= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢"
 
             if closed:
                 pnl = invested * ((exit_p - p_in) / p_in if direction == "LONG" else (p_in - exit_p) / p_in)
@@ -213,7 +212,7 @@ def run_scanner_cycle():
         elif pair in data["active_trades"] and not real_position_exists and not DRY_RUN:
             del data["active_trades"][pair]
 
-        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА СТВОРЕННЯ ОРДЕРІВ (ОДИН ЗАПИТ ЗІ СТОПОМ) ---
+        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА СТВОРЕННЯ ОРДЕРІВ (ОДИН ЗАПИТ ЗІ СТОПОМ ЧИСЛОМ) ---
         else:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
@@ -245,11 +244,13 @@ def run_scanner_cycle():
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
                         
-                        # Для BTC, ETH, SOL множимо стоп назад на 100 для API WhiteBIT
+                        # Корекція стопу
                         api_sl_price = sl_raw * 100.0 if (pair.startswith("BTC") or pair.startswith("ETH") or pair.startswith("SOL")) else sl_raw
-                        formatted_sl = exchange.price_to_precision(pair, api_sl_price)
+                        
+                        # СТРОГО float() щоб біржа не лаялась на тип string
+                        formatted_sl = float(exchange.price_to_precision(pair, api_sl_price))
 
-                        # ПАКУЄМО СТОП-ЛОСС В ОДИН ЗАПИТ
+                        # ПАКУЄМО СТОП-ЛОСС ЯК ЧИСЛО
                         order_params = {
                             'stopLoss': {
                                 'triggerPrice': formatted_sl,
@@ -257,7 +258,6 @@ def run_scanner_cycle():
                             }
                         }
 
-                        # Створення ордера
                         exchange.create_order(pair, 'market', side, formatted_amount, params=order_params)
                         
                     except Exception as e:
@@ -293,4 +293,3 @@ if __name__ == "__main__":
                     print("🚨 Помилка в циклі виконання.")
         if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
         time.sleep(0.5)
-    
