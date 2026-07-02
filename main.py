@@ -154,7 +154,7 @@ def run_scanner_cycle():
                     sl_id, tp_id = trade.get("sl_order_id"), trade.get("tp_order_id")
                     sl_status = exchange.fetch_order(sl_id, pair) if sl_id else {'status': 'open'}
                     tp_status = exchange.fetch_order(tp_id, pair) if tp_id else {'status': 'open'}
-                    
+
                     if sl_status['status'] == 'closed':
                         exit_p, closed, reason = float(sl_status.get('average', trade["stop_loss"])), True, "STOP_LOSS 🔴 (БІРЖА)"
                         if tp_id:
@@ -200,7 +200,7 @@ def run_scanner_cycle():
 
                         market_info = exchange.market(pair)
                         min_amount = market_info['limits']['amount']['min']
-                        
+
                         amount_to_buy = (INVEST_PER_TRADE * LEVERAGE) / current_price
                         if amount_to_buy < min_amount: amount_to_buy = min_amount
 
@@ -212,32 +212,73 @@ def run_scanner_cycle():
                         elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
                         elif order.get('price', 0) > 0: real_entry_price = float(order['price'])
 
-                        tp = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
-                        sl = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+                        # Розрахунок рівнів
+                        tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
+                        sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+                        
+                        # Безпечне округлення відповідно до специфікації ринку
+                        price_precision = market_info.get('precision', {}).get('price', 2)
+                        f_sl = round(sl_raw, price_precision)
+                        f_tp = round(tp_raw, price_precision)
+
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
+                        # 1. Виставлення STOP LOSS (stopMarket)
                         try:
-                            f_sl = exchange.price_to_precision(pair, sl)
-                            sl_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, {'stopPrice': f_sl, 'activationPrice': f_sl, 'reduceOnly': True})
+                            sl_order = exchange.create_order(
+                                symbol=pair,
+                                type='stopMarket',
+                                side=trigger_side,
+                                amount=formatted_amount,
+                                price=None,
+                                params={'stopPrice': f_sl, 'activationPrice': f_sl, 'reduceOnly': True}
+                            )
                             sl_order_id = sl_order.get('id')
-                        except Exception as e: print(f"  ⚠️ Помилка SL: {e}")
+                        except Exception as e: 
+                            print(f"  ⚠️ Помилка SL: {e}")
 
+                        # 2. Виставлення TAKE PROFIT (marketIfTouched)
                         try:
-                            f_tp = exchange.price_to_precision(pair, tp)
-                            tp_order = exchange.create_order(pair, 'stopMarket', trigger_side, formatted_amount, None, {'stopPrice': f_tp, 'activationPrice': f_tp, 'reduceOnly': True})
+                            tp_order = exchange.create_order(
+                                symbol=pair,
+                                type='marketIfTouched',
+                                side=trigger_side,
+                                amount=formatted_amount,
+                                price=None,
+                                params={'stopPrice': f_tp, 'activationPrice': f_tp, 'reduceOnly': True}
+                            )
                             tp_order_id = tp_order.get('id')
-                        except Exception as e: print(f"  ⚠️ Помилка TP: {e}")
+                        except Exception as e:
+                            # Фолбек на випадок специфічного синтаксису API WhiteBIT v4 в CCXT
+                            try:
+                                tp_order = exchange.create_order(
+                                    symbol=pair,
+                                    type='stopMarket',
+                                    side=trigger_side,
+                                    amount=formatted_amount,
+                                    price=None,
+                                    params={'stopPrice': f_tp, 'activationPrice': f_tp, 'reduceOnly': True, 'type': 'marketIfTouched'}
+                                )
+                                tp_order_id = tp_order.get('id')
+                            except Exception as e2:
+                                print(f"  ⚠️ Помилка TP: {e2}")
 
+                        # Якщо один з захисних ордерів не виставився — маркетно закриваємо позицію задля безпеки
                         if not sl_order_id or not tp_order_id:
+                            print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
                             exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
                             continue
-                    except: continue
+                            
+                        tp, sl = f_tp, f_sl
+                    except Exception as e:
+                        print(f"  ❌ Помилка відкриття позиції: {e}")
+                        continue
                 else:
                     tp = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                     sl = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
                     data["balance_usdt"] -= INVEST_PER_TRADE
 
-                print(f"  🔥 СИГНАЛ {direction} НА {pair}!")
+                print(f"  🔥 СИГНАЛ {direction} НА {pair}! (Вхід: {real_entry_price}, SL: {sl}, TP: {tp})")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
                     "invested_amount": INVEST_PER_TRADE, "take_profit": tp, "stop_loss": sl,
@@ -258,6 +299,6 @@ if __name__ == "__main__":
             if now.second >= 2: 
                 last_processed_minute = now.minute
                 try: run_scanner_cycle()
-                except: pass
+                except Exception as main_e: print(f"🚨 Помилка в циклі: {main_e}")
         if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
         time.sleep(0.5)
