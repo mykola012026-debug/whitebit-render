@@ -165,7 +165,7 @@ def run_scanner_cycle():
         # --- БЛОК 1: МОНІТОРИНГ АКТИВНОЇ ПОЗИЦІЇ (АЛГОРИТМІЧНИЙ ВИХІД) ---
         if real_position_exists or (DRY_RUN and pair in data["active_trades"]):
             if not DRY_RUN and pair not in data["active_trades"] and real_pos_data:
-                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Відновлюємо дані по {pair} в базі...")
+                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Відновлюємо позицію по {pair} в базі...")
                 r_entry = float(real_pos_data.get('entryPrice') or current_price)
                 if pair.startswith("BTC") and r_entry > 500000: r_entry /= 100.0
                 if pair.startswith("ETH") and r_entry > 15000: r_entry /= 100.0
@@ -187,6 +187,7 @@ def run_scanner_cycle():
             invested = trade["invested_amount"]
             closed, exit_p, reason = False, current_price, ""
 
+            # Бот сам повністю перевіряє Тейк і Стоп по свічках
             if direction == "LONG":
                 if market["current_low"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴"
                 elif market["current_high"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢"
@@ -207,12 +208,12 @@ def run_scanner_cycle():
                 trade.update({"status": reason, "exit_price": exit_p, "close_time": time.strftime("%Y-%m-%d %H:%M:%S"), "pnl": pnl})
                 data["history"].append(trade)
                 del data["active_trades"][pair]
-                print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
+                print(f"  🏁 Закрито {pair} алгоритмом! Результат: {pnl:+.2f} USDT ({reason})")
 
         elif pair in data["active_trades"] and not real_position_exists and not DRY_RUN:
             del data["active_trades"][pair]
 
-        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА СТВОРЕННЯ ОРДЕРІВ (ОДИН ЗАПИТ ЗІ СТОПОМ ЧИСЛОМ) ---
+        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА ЧИСТИЙ ВХІД БЕЗ СТОПІВ НА БІРЖІ ---
         else:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
@@ -226,7 +227,7 @@ def run_scanner_cycle():
 
                 if not DRY_RUN:
                     try:
-                        print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair} відразу зі Стоп-Лоссом...")
+                        print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair} (чистий маркет-ордер)...")
                         side = 'buy' if direction == "LONG" else 'sell'
                         try: exchange.set_leverage(LEVERAGE, pair)
                         except: pass
@@ -240,35 +241,20 @@ def run_scanner_cycle():
                         formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
                         if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
 
-                        # Розрахунок рівнів
-                        tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
-                        sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
-                        
-                        # Корекція стопу
-                        api_sl_price = sl_raw * 100.0 if (pair.startswith("BTC") or pair.startswith("ETH") or pair.startswith("SOL")) else sl_raw
-                        
-                        # СТРОГО float() щоб біржа не лаялась на тип string
-                        formatted_sl = float(exchange.price_to_precision(pair, api_sl_price))
-
-                        # ПАКУЄМО СТОП-ЛОСС ЯК ЧИСЛО
-                        order_params = {
-                            'stopLoss': {
-                                'triggerPrice': formatted_sl,
-                                'type': 'market'
-                            }
-                        }
-
-                        exchange.create_order(pair, 'market', side, formatted_amount, params=order_params)
+                        # Просто створюємо звичайний чистий ордер, який біржа виконає без заминок
+                        exchange.create_order(pair, 'market', side, formatted_amount)
                         
                     except Exception as e:
-                        print(f"  ❌ Біржа відхилила комбо-ордер: {e}. Угода скасована.")
+                        print(f"  ❌ Помилка чистого входу: {e}")
                         continue
                 else:
-                    tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
-                    sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
                     data["balance_usdt"] -= INVEST_PER_TRADE
 
-                print(f"  🔥 УСПІШНИЙ ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.2f}, SL: {sl_raw:.2f}, TP: {tp_raw:.2f})")
+                # Прораховуємо рівні виходу ТІЛЬКИ для себе локально
+                tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
+                sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+
+                print(f"  🔥 ЧИСТИЙ ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.2f}, SL: {sl_raw:.2f}, TP: {tp_raw:.2f} контролюються алгоритмом)")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
                     "invested_amount": INVEST_PER_TRADE, "take_profit": tp_raw, "stop_loss": sl_raw,
