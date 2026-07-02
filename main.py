@@ -251,18 +251,29 @@ def run_scanner_cycle():
 
                         # Виконання входу по маркету
                         order = exchange.create_order(pair, 'market', side, formatted_amount)
-                        if 'trades' in order and order['trades']: real_entry_price = float(order['trades'][0].get('price', current_price))
-                        elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
-                        elif order.get('price', 0) > 0: real_entry_price = float(order['price'])
+                        
+                        # ВИПРАВЛЕННЯ: Отримуємо чисту поточну ціну з тікера, щоб уникнути викривлень
+                        try:
+                            ticker = exchange.fetch_ticker(pair)
+                            real_entry_price = float(ticker['last'])
+                        except:
+                            if 'trades' in order and order['trades']: real_entry_price = float(order['trades'][0].get('price', current_price))
+                            elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
+                            else: real_entry_price = current_price
+
+                        # ДОРЕЗАННЯ ФАНТОМНИХ МІЛЬЙОНІВ: Якщо ціна виявилась аномально задраною через лоти CCXT
+                        if pair.startswith("BTC") and real_entry_price > 500000: real_entry_price /= 1000.0
+                        if pair.startswith("ETH") and real_entry_price > 15000: real_entry_price /= 100.0
+                        if pair.startswith("SOL") and real_entry_price > 700: real_entry_price /= 100.0
 
                         # Залізна пауза для реєстрації позиції модулем ризиків біржі
                         time.sleep(1.0)
 
-                        # Розрахунок рівнів стопів
+                        # Розрахунок рівнів стопів від АДЕКВАТНОЇ ціни
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
                         f_sl = exchange.price_to_precision(pair, sl_raw)
-                        f_tp = exchange.price_to_precision(pair, tp_raw)
+                        f_tp = exchange.price_to_precision(pair, f_tp_raw if 'f_tp_raw' in locals() else tp_raw)
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
                         sl_cond = "lte" if direction == "LONG" else "gte"
 
@@ -317,6 +328,13 @@ if __name__ == "__main__":
             if now.second >= 2: 
                 last_processed_minute = now.minute
                 try: run_scanner_cycle()
-                except Exception as main_e: print(f"🚨 Критична помилка в циклі: {main_e}")
+                except Exception as main_e: print(f"🚨 Критична
+
+
+
+
+
+
+ помилка в циклі: {main_e}")
         if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
         time.sleep(0.5)
