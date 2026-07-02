@@ -216,9 +216,9 @@ def run_scanner_cycle():
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
 
-                        # Безпечне та точне нативне форматування під вимоги конкретної пари на WhiteBIT
-                        f_sl = float(exchange.price_to_precision(pair, sl_raw))
-                        f_tp = float(exchange.price_to_precision(pair, tp_raw))
+                        # Текстове нативне форматування під вимоги API WhiteBIT (без float-обгортки)
+                        f_sl = exchange.price_to_precision(pair, sl_raw)
+                        f_tp = exchange.price_to_precision(pair, tp_raw)
 
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
@@ -268,7 +268,8 @@ def run_scanner_cycle():
                             exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
                             continue
 
-                        tp, sl = f_tp, f_sl
+                        # Перетворюємо назад у float суворо ДЛЯ локальної БД та логів
+                        tp, sl = float(f_tp), float(f_sl)
                     except Exception as e:
                         print(f"  ❌ Помилка відкриття позиції: {e}")
                         continue
