@@ -6,14 +6,15 @@ import csv
 import random
 from datetime import datetime
 
-# --- НАЛАШТУВАННЯ СКАНЕРА & РИЗИКІВ ---
+# --- НАЛАШТУВАННЯ СКАНЕРА & РИЗИКІВ (РЕЖИМ СНАЙПЕРА) ---
 SCAN_MARKETS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "FET/USDT:USDT", 
     "ONDO/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "RENDER/USDT:USDT", "LINK/USDT:USDT"
 ]
-TAKE_PROFIT_PCT = 0.05      
-STOP_LOSS_PCT = 0.035       
-VOLUME_MULTIPLIER = 2.2     
+TAKE_PROFIT_PCT = 0.05      # 5% руху ціни (Тейк став більшим)
+STOP_LOSS_PCT = 0.035       # 3.5% руху ціни (Даємо позиції "дихати")
+VOLUME_MULTIPLIER = 2.2     # Вхід ТІЛЬКИ якщо об'єм у 2.2 рази вищий за норму
+ANOMALY_COEF = 2.5          # Жорсткий фільтр: якщо свічка більша за норму в 2.5 рази — вхід ЗАБОРОНЕНО
 INVEST_PER_TRADE = 5.5      
 LEVERAGE = 3
 DRY_RUN = False 
@@ -95,6 +96,15 @@ def fetch_safe_balance():
         try: return exchange.fetch_balance()
         except: time.sleep(1 + random.uniform(0.5, 1.5))
 
+def clean_whitebit_price(pair, price):
+    """ Жорстке коригування контрактних цін WhiteBIT (х100) """
+    if not price: return 0.0
+    val = float(price)
+    if pair.startswith("BTC") and val > 400000: val /= 100.0
+    elif pair.startswith("ETH") and val > 15000: val /= 100.0
+    elif pair.startswith("SOL") and val > 500: val /= 100.0
+    return val
+
 # --- ОСНОВНИЙ МОДУЛЬ АНАЛІЗУ ТА ТОРГІВЛІ ---
 def run_scanner_cycle():
     data = load_data()
@@ -107,7 +117,7 @@ def run_scanner_cycle():
             return
 
     active_count = len(data["active_trades"])
-    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій локально: {active_count}")
+    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій в базі бота: {active_count}")
 
     real_active_positions = {}
     if not DRY_RUN:
@@ -122,64 +132,46 @@ def run_scanner_cycle():
 
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
-        time.sleep(0.2)
+        time.sleep(0.1)
         
         real_position_exists = pair in real_active_positions
-        real_pos_data = real_active_positions.get(pair)
 
         try:
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=98)
             if not candles or len(candles) < 98: continue
+            
+            # Парсимо та чистимо ціни свічок від х100 множника WhiteBIT
+            c_open = clean_whitebit_price(pair, candles[-2][1])
+            c_high = clean_whitebit_price(pair, candles[-2][2])
+            c_low = clean_whitebit_price(pair, candles[-2][3])
+            c_close = clean_whitebit_price(pair, candles[-2][4])
+            c_vol = float(candles[-2][5])
+
+            curr_low = clean_whitebit_price(pair, candles[-1][3])
+            curr_high = clean_whitebit_price(pair, candles[-1][2])
+            current_price = clean_whitebit_price(pair, candles[-1][4])
+
             past_volumes = [float(candle[5]) for candle in candles[:-2]]
             avg_volume_24h = sum(past_volumes) / len(past_volumes)
-            past_atr = [abs(float(c[2]) - float(c[3])) for c in candles[:-2]]
-            avg_atr_24h = sum(past_atr) / len(past_atr)
-            confirmed_candle = candles[-2]
-            confirmed_spread = abs(float(confirmed_candle[2]) - float(confirmed_candle[3]))
-            current_price = float(candles[-1][4])
             
-            # Корекція ціни від контрактного множника х100
-            if pair.startswith("BTC") and current_price > 500000: current_price /= 100.0
-            if pair.startswith("ETH") and current_price > 15000: current_price /= 100.0
-            if pair.startswith("SOL") and current_price > 700: current_price /= 100.0
+            past_atr = [abs(clean_whitebit_price(pair, c[2]) - clean_whitebit_price(pair, c[3])) for c in candles[:-2]]
+            avg_atr_24h = sum(past_atr) / len(past_atr)
+            
+            confirmed_spread = abs(c_high - c_low)
 
             market = {
-                "open_price": float(confirmed_candle[1]),
-                "close_price": float(confirmed_candle[4]),
-                "volume": float(confirmed_candle[5]),
-                "avg_volume_24h": avg_volume_24h,
-                "current_low": float(candles[-1][3]),
-                "current_high": float(candles[-1][2]),
-                "confirmed_spread": confirmed_spread,
-                "avg_atr": avg_atr_24h
+                "open_price": c_open, "close_price": c_close, "volume": c_vol,
+                "avg_volume_24h": avg_volume_24h, "current_low": curr_low,
+                "current_high": curr_high, "confirmed_spread": confirmed_spread, "avg_atr": avg_atr_24h
             }
         except: continue
 
-        if pair.startswith("BTC") and market["open_price"] > 500000:
-            for key in ["open_price", "close_price", "current_low", "current_high"]: market[key] /= 100.0
-        if pair.startswith("ETH") and market["open_price"] > 15000:
-            for key in ["open_price", "close_price", "current_low", "current_high"]: market[key] /= 100.0
-        if pair.startswith("SOL") and market["open_price"] > 700:
-            for key in ["open_price", "close_price", "current_low", "current_high"]: market[key] /= 100.0
-
-        # --- БЛОК 1: МОНІТОРИНГ АКТИВНОЇ ПОЗИЦІЇ (АЛГОРИТМІЧНИЙ ВИХІД) ---
-        if real_position_exists or (DRY_RUN and pair in data["active_trades"]):
-            if not DRY_RUN and pair not in data["active_trades"] and real_pos_data:
-                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Відновлюємо позицію по {pair} в базі...")
-                r_entry = float(real_pos_data.get('entryPrice') or current_price)
-                if pair.startswith("BTC") and r_entry > 500000: r_entry /= 100.0
-                if pair.startswith("ETH") and r_entry > 15000: r_entry /= 100.0
-                if pair.startswith("SOL") and r_entry > 700: r_entry /= 100.0
-
-                data["active_trades"][pair] = {
-                    "pair": pair, 
-                    "direction": "LONG" if real_pos_data.get('side') == 'long' else "SHORT",
-                    "buy_price": r_entry,
-                    "invested_amount": INVEST_PER_TRADE, 
-                    "take_profit": r_entry * (1 + TAKE_PROFIT_PCT if real_pos_data.get('side') == 'long' else 1 - TAKE_PROFIT_PCT), 
-                    "stop_loss": r_entry * (1 - STOP_LOSS_PCT if real_pos_data.get('side') == 'long' else 1 + STOP_LOSS_PCT),
-                    "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
-                }
+        # --- БЛОК 1: МОНІТОРИНГ ЛОКАЛЬНИХ ПОЗИЦІЙ ---
+        if pair in data["active_trades"]:
+            # Якщо локально в базі є, а на біржі позицію вже закрито руками/біржею — видаляємо з бази
+            if not real_position_exists and not DRY_RUN:
+                del data["active_trades"][pair]
+                continue
 
             trade = data["active_trades"][pair]
             direction = trade.get("direction", "LONG")
@@ -187,7 +179,6 @@ def run_scanner_cycle():
             invested = trade["invested_amount"]
             closed, exit_p, reason = False, current_price, ""
 
-            # Бот сам повністю перевіряє Тейк і Стоп по свічках
             if direction == "LONG":
                 if market["current_low"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴"
                 elif market["current_high"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢"
@@ -208,26 +199,23 @@ def run_scanner_cycle():
                 trade.update({"status": reason, "exit_price": exit_p, "close_time": time.strftime("%Y-%m-%d %H:%M:%S"), "pnl": pnl})
                 data["history"].append(trade)
                 del data["active_trades"][pair]
-                print(f"  🏁 Закрито {pair} алгоритмом! Результат: {pnl:+.2f} USDT ({reason})")
+                print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
 
-        elif pair in data["active_trades"] and not real_position_exists and not DRY_RUN:
-            del data["active_trades"][pair]
-
-        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА ЧИСТИЙ ВХІД БЕЗ СТОПІВ НА БІРЖІ ---
-        else:
+        # --- БЛОК 2: ПОШУК СИГНАЛІВ (ВХІД ТІЛЬКИ ЯКЩО НЕМАЄ РЕАЛЬНОЇ ПОЗИЦІЇ) ---
+        elif not real_position_exists:
             current_volume = market["volume"]
             avg_volume = market["avg_volume_24h"]
             volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
             is_green_candle = market["close_price"] > market["open_price"]
-            overextended = market["confirmed_spread"] > (market["avg_atr"] * 5.0)
+            overextended = market["confirmed_spread"] > (market["avg_atr"] * ANOMALY_COEF)
 
-            if volume_spike and not overextended and free_balance >= 2.0:
+            if volume_spike and not overextended and free_balance >= 5.0:
                 direction = "LONG" if is_green_candle else "SHORT"
                 real_entry_price = current_price
 
                 if not DRY_RUN:
                     try:
-                        print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair} (чистий маркет-ордер)...")
+                        print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair}...")
                         side = 'buy' if direction == "LONG" else 'sell'
                         try: exchange.set_leverage(LEVERAGE, pair)
                         except: pass
@@ -241,20 +229,18 @@ def run_scanner_cycle():
                         formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
                         if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
 
-                        # Просто створюємо звичайний чистий ордер, який біржа виконає без заминок
                         exchange.create_order(pair, 'market', side, formatted_amount)
                         
                     except Exception as e:
-                        print(f"  ❌ Помилка чистого входу: {e}")
+                        print(f"  ❌ Помилка входу: {e}")
                         continue
                 else:
                     data["balance_usdt"] -= INVEST_PER_TRADE
 
-                # Прораховуємо рівні виходу ТІЛЬКИ для себе локально
                 tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                 sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
 
-                print(f"  🔥 ЧИСТИЙ ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.2f}, SL: {sl_raw:.2f}, TP: {tp_raw:.2f} контролюються алгоритмом)")
+                print(f"  🔥 ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.4f}, SL: {sl_raw:.4f}, TP: {tp_raw:.4f})")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
                     "invested_amount": INVEST_PER_TRADE, "take_profit": tp_raw, "stop_loss": sl_raw,
