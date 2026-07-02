@@ -14,10 +14,7 @@ SCAN_MARKETS = [
     "ONDO/USDT", "NEAR/USDT", "SUI/USDT", "RENDER/USDT", "LINK/USDT"
 ]
 
-TAKE_PROFIT_PCT = 0.03      # Ціль: +3%
-STOP_LOSS_PCT = 0.015       # Захист: -1.5%
-VOLUME_MULTIPLIER = 2.5     # Коефіцієнт аномального об'єму
-INVEST_PER_TRADE = 1.5      # Об'єм однієї угоди (Увага: WhiteBIT може вимагати > 2-5 USDT для деяких пар)
+
 
 # ⚠️ РЕЖИМ ТЕСТУВАННЯ (DRY RUN)
 DRY_RUN = False 
