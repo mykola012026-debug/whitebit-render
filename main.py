@@ -254,8 +254,8 @@ def run_scanner_cycle():
                             elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
                             else: real_entry_price = current_price
 
-                        # Захист від викривлення ціни лотів
-                        if pair.startswith("BTC") and real_entry_price > 500000: real_entry_price /= 1000.0
+                        # Захист від викривлення ціни через Contract Multiplier (ділимо на 100)
+                        if pair.startswith("BTC") and real_entry_price > 500000: real_entry_price /= 100.0
                         if pair.startswith("ETH") and real_entry_price > 15000: real_entry_price /= 100.0
                         if pair.startswith("SOL") and real_entry_price > 700: real_entry_price /= 100.0
 
@@ -285,7 +285,7 @@ def run_scanner_cycle():
                             )
                             tp_order_id = tp_order.get('id')
                         except:
-                            print(f"  ℹ surge: ТР контролюється алгоритмом бота.")
+                            print(f"  ℹ️ Автоматичний ТР заблоковано лімітом біржі. Супроводження тейку бере на себе алгоритм бота.")
 
                         tp, sl = float(f_tp), float(f_sl)
                     except Exception as e:
