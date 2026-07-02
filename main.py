@@ -216,13 +216,20 @@ def run_scanner_cycle():
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
 
-                        # Текстове нативне форматування під вимоги API WhiteBIT (без float-обгортки)
                         f_sl = exchange.price_to_precision(pair, sl_raw)
                         f_tp = exchange.price_to_precision(pair, tp_raw)
 
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
-                        # 1. Виставлення STOP LOSS (stopMarket)
+                        # Визначаємо умови активації (condition): gte (>= для росту), lte (<= для падіння)
+                        if direction == "LONG":
+                            sl_condition = "lte"  
+                            tp_condition = "gte"  
+                        else:
+                            sl_condition = "gte"  
+                            tp_condition = "lte"  
+
+                        # 1. Виставлення STOP LOSS
                         try:
                             sl_order = exchange.create_order(
                                 symbol=pair,
@@ -230,45 +237,42 @@ def run_scanner_cycle():
                                 side=trigger_side,
                                 amount=formatted_amount,
                                 price=None,
-                                params={'stopPrice': f_sl, 'activationPrice': f_sl, 'reduceOnly': True}
+                                params={
+                                    'activationPrice': f_sl, 
+                                    'condition': sl_condition,
+                                    'reduceOnly': True
+                                }
                             )
                             sl_order_id = sl_order.get('id')
                         except Exception as e: 
                             print(f"  ⚠️ Помилка SL: {e}")
 
-                        # 2. Виставлення TAKE PROFIT (marketIfTouched)
+                        # 2. Виставлення TAKE PROFIT
                         try:
                             tp_order = exchange.create_order(
                                 symbol=pair,
-                                type='marketIfTouched',
+                                type='stopMarket',
                                 side=trigger_side,
                                 amount=formatted_amount,
                                 price=None,
-                                params={'stopPrice': f_tp, 'activationPrice': f_tp, 'reduceOnly': True}
+                                params={
+                                    'activationPrice': f_tp, 
+                                    'condition': tp_condition,
+                                    'reduceOnly': True
+                                }
                             )
                             tp_order_id = tp_order.get('id')
                         except Exception as e:
-                            # Фолбек на випадок специфічної структури API WhiteBIT в CCXT
-                            try:
-                                tp_order = exchange.create_order(
-                                    symbol=pair,
-                                    type='stopMarket',
-                                    side=trigger_side,
-                                    amount=formatted_amount,
-                                    price=None,
-                                    params={'stopPrice': f_tp, 'activationPrice': f_tp, 'reduceOnly': True, 'type': 'marketIfTouched'}
-                                )
-                                tp_order_id = tp_order.get('id')
-                            except Exception as e2:
-                                print(f"  ⚠️ Помилка TP: {e2}")
+                            print(f"  ⚠️ Помилка TP: {e}")
 
-                        # Якщо один з захисних ордерів не виставився — маркетно закриваємо позицію задля безпеки капіталу
+                        # Якщо один з захисних ордерів не виставився — закриваємо позицію по маркету
                         if not sl_order_id or not tp_order_id:
                             print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
-                            exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
+                            try:
+                                exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
+                            except: pass
                             continue
 
-                        # Перетворюємо назад у float суворо ДЛЯ локальної БД та логів
                         tp, sl = float(f_tp), float(f_sl)
                     except Exception as e:
                         print(f"  ❌ Помилка відкриття позиції: {e}")
