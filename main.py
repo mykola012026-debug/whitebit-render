@@ -215,9 +215,14 @@ def run_scanner_cycle():
                         # Розрахунок рівнів
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
-                        
-                        # Безпечне округлення відповідно до специфікації ринку
+
+                        # Безпечне виправлення для точності WhiteBIT
                         price_precision = market_info.get('precision', {}).get('price', 2)
+                        if isinstance(price_precision, float):
+                            price_precision = len(str(price_precision).split('.')[1].rstrip('0'))
+                        else:
+                            price_precision = int(price_precision)
+
                         f_sl = round(sl_raw, price_precision)
                         f_tp = round(tp_raw, price_precision)
 
@@ -268,7 +273,7 @@ def run_scanner_cycle():
                             print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
                             exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
                             continue
-                            
+
                         tp, sl = f_tp, f_sl
                     except Exception as e:
                         print(f"  ❌ Помилка відкриття позиції: {e}")
