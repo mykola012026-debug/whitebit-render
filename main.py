@@ -137,6 +137,12 @@ def run_scanner_cycle():
             confirmed_candle = candles[-2]
             confirmed_spread = abs(float(confirmed_candle[2]) - float(confirmed_candle[3]))
             current_price = float(candles[-1][4])
+            
+            # Корекція поточної ціни від свічок для детекту обсягів
+            if pair.startswith("BTC") and current_price > 500000: current_price /= 100.0
+            if pair.startswith("ETH") and current_price > 15000: current_price /= 100.0
+            if pair.startswith("SOL") and current_price > 700: current_price /= 100.0
+
             market = {
                 "open_price": float(confirmed_candle[1]),
                 "close_price": float(confirmed_candle[4]),
@@ -149,17 +155,33 @@ def run_scanner_cycle():
             }
         except: continue
 
+        # Корригуємо внутрішні елементи структури market для LONG/SHORT розрахунків
+        if pair.startswith("BTC") and market["open_price"] > 500000:
+            for key in ["open_price", "close_price", "current_low", "current_high"]:
+                market[key] /= 100.0
+        if pair.startswith("ETH") and market["open_price"] > 15000:
+            for key in ["open_price", "close_price", "current_low", "current_high"]:
+                market[key] /= 100.0
+        if pair.startswith("SOL") and market["open_price"] > 700:
+            for key in ["open_price", "close_price", "current_low", "current_high"]:
+                market[key] /= 100.0
+
         # --- БЛОК 1: МОНІТОРИНГ ВЖЕ ВІДКРИТИХ ПОЗИЦІЙ ---
         if real_position_exists or (DRY_RUN and pair in data["active_trades"]):
             if not DRY_RUN and pair not in data["active_trades"] and real_pos_data:
                 print(f"  🔗 [СИНХРОНІЗАЦІЯ] Знайдено активну позицію по {pair} на WhiteBIT. Відновлюємо дані в базі...")
+                r_entry = float(real_pos_data.get('entryPrice') or current_price)
+                if pair.startswith("BTC") and r_entry > 500000: r_entry /= 100.0
+                if pair.startswith("ETH") and r_entry > 15000: r_entry /= 100.0
+                if pair.startswith("SOL") and r_entry > 700: r_entry /= 100.0
+
                 data["active_trades"][pair] = {
                     "pair": pair, 
                     "direction": "LONG" if real_pos_data.get('side') == 'long' else "SHORT",
-                    "buy_price": float(real_pos_data.get('entryPrice') or current_price),
+                    "buy_price": r_entry,
                     "invested_amount": INVEST_PER_TRADE, 
-                    "take_profit": current_price * (1 + TAKE_PROFIT_PCT), 
-                    "stop_loss": current_price * (1 - STOP_LOSS_PCT),
+                    "take_profit": r_entry * (1 + TAKE_PROFIT_PCT), 
+                    "stop_loss": r_entry * (1 - STOP_LOSS_PCT),
                     "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
 
@@ -183,12 +205,20 @@ def run_scanner_cycle():
                     tp_status = exchange.fetch_order(tp_id, pair) if tp_id else {'status': 'open'}
 
                     if sl_status['status'] == 'closed':
-                        exit_p, closed, reason = float(sl_status.get('average') or trade["stop_loss"]), True, "STOP_LOSS 🔴 (БІРЖА)"
+                        raw_sl_avg = float(sl_status.get('average') or trade["stop_loss"])
+                        if pair.startswith("BTC") and raw_sl_avg > 500000: raw_sl_avg /= 100.0
+                        if pair.startswith("ETH") and raw_sl_avg > 15000: raw_sl_avg /= 100.0
+                        if pair.startswith("SOL") and raw_sl_avg > 700: raw_sl_avg /= 100.0
+                        exit_p, closed, reason = raw_sl_avg, True, "STOP_LOSS 🔴 (БІРЖА)"
                         if tp_id:
                             try: exchange.cancel_order(tp_id, pair)
                             except: pass
                     elif tp_status['status'] == 'closed':
-                        exit_p, closed, reason = float(tp_status.get('average') or trade["take_profit"]), True, "TAKE_PROFIT 🟢 (БІРЖА)"
+                        raw_tp_avg = float(tp_status.get('average') or trade["take_profit"])
+                        if pair.startswith("BTC") and raw_tp_avg > 500000: raw_tp_avg /= 100.0
+                        if pair.startswith("ETH") and raw_tp_avg > 15000: raw_tp_avg /= 100.0
+                        if pair.startswith("SOL") and raw_tp_avg > 700: raw_tp_avg /= 100.0
+                        exit_p, closed, reason = raw_tp_avg, True, "TAKE_PROFIT 🟢 (БІРЖА)"
                         if sl_id:
                             try: exchange.cancel_order(sl_id, pair)
                             except: pass
@@ -254,7 +284,7 @@ def run_scanner_cycle():
                             elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
                             else: real_entry_price = current_price
 
-                        # Захист від викривлення ціни через Contract Multiplier (ділимо на 100)
+                        # Захист від викривлення ціни контракту (ділимо на 100.0)
                         if pair.startswith("BTC") and real_entry_price > 500000: real_entry_price /= 100.0
                         if pair.startswith("ETH") and real_entry_price > 15000: real_entry_price /= 100.0
                         if pair.startswith("SOL") and real_entry_price > 700: real_entry_price /= 100.0
@@ -263,8 +293,16 @@ def run_scanner_cycle():
 
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
-                        f_sl = exchange.price_to_precision(pair, sl_raw)
-                        f_tp = exchange.price_to_precision(pair, tp_raw)
+                        
+                        # Перед відправкою на біржу повертаємо ціну у формат лоту ринку (множимо назад на 100 для потрібних пар)
+                        api_sl_price = sl_raw
+                        api_tp_price = tp_raw
+                        if pair.startswith("BTC") or pair.startswith("ETH") or pair.startswith("SOL"):
+                            api_sl_price *= 100.0
+                            api_tp_price *= 100.0
+
+                        f_sl = exchange.price_to_precision(pair, api_sl_price)
+                        f_tp = exchange.price_to_precision(pair, api_tp_price)
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
                         sl_cond = "lte" if direction == "LONG" else "gte"
 
@@ -285,21 +323,20 @@ def run_scanner_cycle():
                             )
                             tp_order_id = tp_order.get('id')
                         except:
-                            print(f"  ℹ️ Автоматичний ТР заблоковано лімітом біржі. Супроводження тейку бере на себе алгоритм бота.")
+                            print(f"  ℹ️ Автоматичний ТР контролюється алгоритмом бота.")
 
-                        tp, sl = float(f_tp), float(f_sl)
                     except Exception as e:
                         print(f"  ❌ Помилка відкриття позиції: {e}")
                         continue
                 else:
-                    tp = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
-                    sl = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+                    tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
+                    sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
                     data["balance_usdt"] -= INVEST_PER_TRADE
 
-                print(f"  🔥 СИГНАЛ {direction} НА {pair}! (Вхід: {real_entry_price}, SL: {sl}, TP: {tp})")
+                print(f"  🔥 СИГНАЛ {direction} НА {pair}! (Вхід: {real_entry_price:.2f}, SL: {sl_raw:.2f}, TP: {tp_raw:.2f})")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
-                    "invested_amount": INVEST_PER_TRADE, "take_profit": tp, "stop_loss": sl,
+                    "invested_amount": INVEST_PER_TRADE, "take_profit": tp_raw, "stop_loss": sl_raw,
                     "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "sl_order_id": sl_order_id, "tp_order_id": tp_order_id
                 }
@@ -316,7 +353,9 @@ if __name__ == "__main__":
         if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
             if now.second >= 2: 
                 last_processed_minute = now.minute
-                try: run_scanner_cycle()
-                except Exception as main_e: print(f"🚨 Критична помилка в циклі: {main_e}")
+                try: 
+                    run_scanner_cycle()
+                except Exception as main_e: 
+                    print(f"🚨 Критична помилка в циклі: {main_e}")
         if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
         time.sleep(0.5)
