@@ -343,10 +343,14 @@ def run_scanner_cycle():
     save_data(data)
 
 # --- БЛОК 3: ТАЙМЕР ТА ЦИКЛ ЗАПУСКУ ---
+# --- БЛОК 3: ТАЙМЕР ТА ЦИКЛ ЗАПУСКУ ---
 if __name__ == "__main__":
     print("🤖 Бот запущенний, база даних синхронізована.")
-    try: exchange.load_markets()
-    except Exception as e: print(f"⚠️ Помилка завантаження ринків: {e}")
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        print(f"⚠️ Помилка завантаження ринків: {e}")
+        
     last_processed_minute = -1
     while True:
         now = datetime.now()
@@ -356,6 +360,7 @@ if __name__ == "__main__":
                 try: 
                     run_scanner_cycle()
                 except Exception as main_e: 
-                    print(f"🚨 Критична помилка в циклі: {main_e}")
-        if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
+                    print("🚨 Критична помилка в циклі виконання!")
+        if now.minute not in [0, 15, 30, 45]:
+            last_processed_minute = -1
         time.sleep(0.5)
