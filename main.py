@@ -207,10 +207,14 @@ def run_scanner_cycle():
                         formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
                         if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
 
+                        # Відправляємо маркет-ордер на відкриття позиції
                         order = exchange.create_order(pair, 'market', side, formatted_amount)
                         if 'trades' in order and order['trades']: real_entry_price = float(order['trades'][0].get('price', current_price))
                         elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
                         elif order.get('price', 0) > 0: real_entry_price = float(order['price'])
+
+                        # ВАЖЛИВО: Обов'язкова пауза, щоб біржа встигла відкрити позицію перед reduceOnly ордерами
+                        time.sleep(0.5)
 
                         # Розрахунок рівнів
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
@@ -221,13 +225,13 @@ def run_scanner_cycle():
 
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
-                        # Визначаємо умови активації (condition): gte (>= для росту), lte (<= для падіння)
+                        # Визначаємо умови активації (condition) під логіку WhiteBIT API
                         if direction == "LONG":
-                            sl_condition = "lte"  
-                            tp_condition = "gte"  
+                            sl_condition = "lte"  # Спрацює, якщо ціна впаде нижче або рівно
+                            tp_condition = "gte"  # Спрацює, якщо ціна виросте вище або рівно
                         else:
-                            sl_condition = "gte"  
-                            tp_condition = "lte"  
+                            sl_condition = "gte"  # Спрацює, якщо ціна виросте вище або рівно (для шорту)
+                            tp_condition = "lte"  # Спрацює, якщо ціна впаде нижче або рівно (для шорту)
 
                         # 1. Виставлення STOP LOSS
                         try:
@@ -265,7 +269,7 @@ def run_scanner_cycle():
                         except Exception as e:
                             print(f"  ⚠️ Помилка TP: {e}")
 
-                        # Якщо один з захисних ордерів не виставився — закриваємо позицію по маркету
+                        # Якщо один з захисних ордерів не виставився — закриваємо позицію по маркету задля безпеки
                         if not sl_order_id or not tp_order_id:
                             print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
                             try:
