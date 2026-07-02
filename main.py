@@ -216,15 +216,9 @@ def run_scanner_cycle():
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                         sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
 
-                        # Безпечне виправлення для точності WhiteBIT
-                        price_precision = market_info.get('precision', {}).get('price', 2)
-                        if isinstance(price_precision, float):
-                            price_precision = len(str(price_precision).split('.')[1].rstrip('0'))
-                        else:
-                            price_precision = int(price_precision)
-
-                        f_sl = round(sl_raw, price_precision)
-                        f_tp = round(tp_raw, price_precision)
+                        # Безпечне та точне нативне форматування під вимоги конкретної пари на WhiteBIT
+                        f_sl = float(exchange.price_to_precision(pair, sl_raw))
+                        f_tp = float(exchange.price_to_precision(pair, tp_raw))
 
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
@@ -254,7 +248,7 @@ def run_scanner_cycle():
                             )
                             tp_order_id = tp_order.get('id')
                         except Exception as e:
-                            # Фолбек на випадок специфічного синтаксису API WhiteBIT v4 в CCXT
+                            # Фолбек на випадок специфічної структури API WhiteBIT в CCXT
                             try:
                                 tp_order = exchange.create_order(
                                     symbol=pair,
@@ -268,7 +262,7 @@ def run_scanner_cycle():
                             except Exception as e2:
                                 print(f"  ⚠️ Помилка TP: {e2}")
 
-                        # Якщо один з захисних ордерів не виставився — маркетно закриваємо позицію задля безпеки
+                        # Якщо один з захисних ордерів не виставився — маркетно закриваємо позицію задля безпеки капіталу
                         if not sl_order_id or not tp_order_id:
                             print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
                             exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
