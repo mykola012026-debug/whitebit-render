@@ -13,9 +13,9 @@ SCAN_MARKETS = [
 ]
 TAKE_PROFIT_PCT = 0.03      
 STOP_LOSS_PCT = 0.015       
-VOLUME_MULTIPLIER = 2.5     
+VOLUME_MULTIPLIER = 1.3     
 INVEST_PER_TRADE = 5.5      
-LEVERAGE = 20
+LEVERAGE = 3
 DRY_RUN = False 
 RESET_DATA = False
 
@@ -185,7 +185,7 @@ def run_scanner_cycle():
             avg_volume = market["avg_volume_24h"]
             volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
             is_green_candle = market["close_price"] > market["open_price"]
-            overextended = market["confirmed_spread"] > (market["avg_atr"] * 3.0)
+            overextended = market["confirmed_spread"] > (market["avg_atr"] * 5.0)
 
             if volume_spike and not overextended and free_balance >= 2.0:
                 direction = "LONG" if is_green_candle else "SHORT"
