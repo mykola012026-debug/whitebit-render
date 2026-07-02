@@ -107,11 +107,28 @@ def run_scanner_cycle():
             return
 
     active_count = len(data["active_trades"])
-    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій: {active_count}")
+    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій локально: {active_count}")
 
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
         time.sleep(0.3)
+        
+        # --- ПЕРЕВІРКА РЕАЛЬНОГО СТАТУСУ НА БІРЖІ (ЗАХИСТ ВІД СИНХРОНІЗАЦІЙНИХ БАГІВ) ---
+        real_position_exists = False
+        real_pos_data = None
+        if not DRY_RUN:
+            try:
+                real_positions = exchange.fetch_positions([pair])
+                if real_positions:
+                    pos = real_positions[0]
+                    # Якщо розмір контракту або загальний розмір більше нуля, позиція активна
+                    if float(pos.get('contracts', 0)) > 0 or float(pos.get('size', 0)) > 0:
+                        real_position_exists = True
+                        real_pos_data = pos
+            except Exception as e:
+                print(f"  ⚠️ Помилка запиту реальних позицій для {pair}: {e}")
+                real_position_exists = pair in data["active_trades"]
+
         try:
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=98)
             if not candles or len(candles) < 98: continue
@@ -135,7 +152,20 @@ def run_scanner_cycle():
         except: continue
 
         # --- БЛОК 1: МОНІТОРИНГ ВЖЕ ВІДКРИТИХ ПОЗИЦІЙ ---
-        if pair in data["active_trades"]:
+        if real_position_exists or (DRY_RUN and pair in data["active_trades"]):
+            # Синхронізуємо локальну базу, якщо угода є на біржі, але злетіла в скрипті
+            if not DRY_RUN and pair not in data["active_trades"] and real_pos_data:
+                print(f"  🔗 [СИНХРОНІЗАЦІЯ] Знайдено активний ордер по {pair} на WhiteBIT. Додаємо в локальну базу...")
+                data["active_trades"][pair] = {
+                    "pair": pair, 
+                    "direction": "LONG" if real_pos_data.get('side') == 'long' else "SHORT",
+                    "buy_price": float(real_pos_data.get('entryPrice', current_price)),
+                    "invested_amount": INVEST_PER_TRADE, 
+                    "take_profit": current_price * (1 + TAKE_PROFIT_PCT), 
+                    "stop_loss": current_price * (1 - STOP_LOSS_PCT),
+                    "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+
             trade = data["active_trades"][pair]
             direction = trade.get("direction", "LONG")
             p_in = trade['buy_price']
@@ -166,10 +196,8 @@ def run_scanner_cycle():
                             try: exchange.cancel_order(sl_id, pair)
                             except: pass
                 except:
-                    if direction == "LONG" and market["current_low"] <= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴 (ФОЛБЕК)"
-                    elif direction == "LONG" and market["current_high"] >= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢 (ФОЛБЕК)"
-                    elif direction == "SHORT" and market["current_high"] >= trade["stop_loss"]: exit_p, closed, reason = trade["stop_loss"], True, "STOP_LOSS 🔴 (ФОЛБЕК)"
-                    elif direction == "SHORT" and market["current_low"] <= trade["take_profit"]: exit_p, closed, reason = trade["take_profit"], True, "TAKE_PROFIT 🟢 (ФОЛБЕК)"
+                    # Якщо ордери не знайдені, але реальна позиція існує на біржі, ми НЕ закриваємо її самостійно
+                    pass
 
             if closed:
                 pnl = invested * ((exit_p - p_in) / p_in if direction == "LONG" else (p_in - exit_p) / p_in)
@@ -178,6 +206,11 @@ def run_scanner_cycle():
                 data["history"].append(trade)
                 del data["active_trades"][pair]
                 print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
+
+        # Очищення фантомних записів, якщо на біржі позиція закрита вручну
+        elif pair in data["active_trades"] and not real_position_exists and not DRY_RUN:
+            print(f"  🧹 Виявлено фантомний запис по {pair} в базі. На біржі позиція відсутня. Видаляємо фантом...")
+            del data["active_trades"][pair]
 
         # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА СТВОРЕННЯ ОРДЕРІВ ---
         else:
@@ -207,14 +240,14 @@ def run_scanner_cycle():
                         formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
                         if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
 
-                        # Відправляємо маркет-ордер на відкриття позиції
+                        # Відправка основного ринкового ордера
                         order = exchange.create_order(pair, 'market', side, formatted_amount)
                         if 'trades' in order and order['trades']: real_entry_price = float(order['trades'][0].get('price', current_price))
                         elif order.get('average', 0) > 0: real_entry_price = float(order['average'])
                         elif order.get('price', 0) > 0: real_entry_price = float(order['price'])
 
-                        # ВАЖЛИВО: Обов'язкова пауза, щоб біржа встигла відкрити позицію перед reduceOnly ордерами
-                        time.sleep(0.5)
+                        # КРИТИЧНО: Пауза 1 секунда, щоб база даних WhiteBIT зафіксувала позицію до відправки ReduceOnly
+                        time.sleep(1.0)
 
                         # Розрахунок рівнів
                         tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
@@ -225,13 +258,12 @@ def run_scanner_cycle():
 
                         trigger_side = 'sell' if direction == "LONG" else 'buy'
 
-                        # Визначаємо умови активації (condition) під логіку WhiteBIT API
                         if direction == "LONG":
-                            sl_condition = "lte"  # Спрацює, якщо ціна впаде нижче або рівно
-                            tp_condition = "gte"  # Спрацює, якщо ціна виросте вище або рівно
+                            sl_condition = "lte"  
+                            tp_condition = "gte"  
                         else:
-                            sl_condition = "gte"  # Спрацює, якщо ціна виросте вище або рівно (для шорту)
-                            tp_condition = "lte"  # Спрацює, якщо ціна впаде нижче або рівно (для шорту)
+                            sl_condition = "gte"  
+                            tp_condition = "lte"  
 
                         # 1. Виставлення STOP LOSS
                         try:
@@ -249,7 +281,7 @@ def run_scanner_cycle():
                             )
                             sl_order_id = sl_order.get('id')
                         except Exception as e: 
-                            print(f"  ⚠️ Помилка SL: {e}")
+                            print(f"  ⚠️ Помилка створення SL ордера: {e}")
 
                         # 2. Виставлення TAKE PROFIT
                         try:
@@ -267,11 +299,11 @@ def run_scanner_cycle():
                             )
                             tp_order_id = tp_order.get('id')
                         except Exception as e:
-                            print(f"  ⚠️ Помилка TP: {e}")
+                            print(f"  ⚠️ Помилка створення TP ордера: {e}")
 
-                        # Якщо один з захисних ордерів не виставився — закриваємо позицію по маркету задля безпеки
+                        # Якщо захист не виставився — негайно виходимо з позиції маркет-ордером
                         if not sl_order_id or not tp_order_id:
-                            print("  🚨 Критична помилка виставлення SL/TP. Закриваємо позицію!")
+                            print("  🚨 Критичний збій захисту SL/TP! Негайно закриваємо позицію по ринку!")
                             try:
                                 exchange.create_order(pair, 'market', 'sell' if direction == "LONG" else 'buy', formatted_amount)
                             except: pass
@@ -297,9 +329,9 @@ def run_scanner_cycle():
 
 # --- БЛОК 3: ТАЙМЕР ТА ЦИКЛ ЗАПУСКУ ---
 if __name__ == "__main__":
-    print("🤖 Бот запущенний.")
+    print("🤖 Бот запущенний і синхронізований.")
     try: exchange.load_markets()
-    except Exception as e: print(f"⚠️ Помилка ринків: {e}")
+    except Exception as e: print(f"⚠️ Помилка завантаження ринків: {e}")
     last_processed_minute = -1
     while True:
         now = datetime.now()
