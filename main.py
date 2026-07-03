@@ -97,7 +97,7 @@ def fetch_safe_balance():
         except: time.sleep(1 + random.uniform(0.5, 1.5))
 
 def clean_symbol_name(symbol):
-    """ Витягує тільки назву базової монети (напр. BTC/USDT:USDT -> BTC, FET-PERP -> FET) """
+    """ Витягує тільки чисту назву монети (напр. FET-PERP -> FET, BTC/USDT:USDT -> BTC) """
     if not symbol: return ""
     s = symbol.replace('/', '-').replace('_', '-').replace(':', '-')
     return s.split('-')[0].upper()
@@ -113,7 +113,9 @@ def run_scanner_cycle():
             print(f"❌ Не вдалося отримати баланс з біржі: {e}")
             return
 
-    # Збір реальних позицій з біржі з покращеним ф'ючерсним фільтром
+    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT")
+
+    # Збір реальних позицій з біржі
     real_active_positions = {}
     if not DRY_RUN:
         try:
@@ -131,14 +133,45 @@ def run_scanner_cycle():
         except Exception as e:
             print(f"  ⚠️ Не вдалося отримати список позицій з біржі: {e}")
 
-    # Оновлюємо кількість угод в базі даних бота ПІСЛЯ синхронізації/автопідхоплення
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
-        time.sleep(0.1)
+        time.sleep(0.05)
 
         clean_pair = clean_symbol_name(pair)
-        real_position_exists = clean_pair in real_active_positions
+        real_pos = real_active_positions.get(clean_pair)
+        real_position_exists = real_pos is not None
 
+        # --- ЕТАП 1: АВТОПІДХОПЛЕННЯ (ПРАЦЮЄ НЕЗАЛЕЖНО ВІД СВІЧОК) ---
+        if real_position_exists and pair not in data["active_trades"]:
+            try:
+                p_size = float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0)
+                direction = "SHORT" if (p_size < 0 or real_pos.get('side') == 'short') else "LONG"
+                
+                # Беремо ціну входу з ордера
+                real_entry_price = float(real_pos.get('entryPrice') or 0)
+                if real_entry_price == 0:
+                    try: 
+                        ticker = exchange.fetch_ticker(pair)
+                        real_entry_price = float(ticker['last'])
+                    except: pass
+                
+                if real_entry_price > 0:
+                    tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
+                    sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+                    contracts = abs(p_size)
+                    est_invested = (contracts * real_entry_price) / LEVERAGE
+                    if est_invested <= 0: est_invested = INVEST_PER_TRADE
+
+                    print(f"  📥 [АВТОПІДХОПЛЕННЯ] Синхронізовано активну позицію для {pair} з біржі.")
+                    data["active_trades"][pair] = {
+                        "pair": pair, "direction": direction, "buy_price": real_entry_price,
+                        "invested_amount": round(est_invested, 2), "take_profit": tp_raw, "stop_loss": sl_raw,
+                        "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+            except Exception as e_adopt:
+                print(f"  ❌ Помилка обробки автопідхоплення для {pair}: {e_adopt}")
+
+        # --- ЕТАП 2: ОТРИМАННЯ РИНКОВИХ ДАНИХ ДЛЯ МОНІТОРИНГУ ТА СИГНАЛІВ ---
         try:
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=98)
             if not candles or len(candles) < 98: continue
@@ -166,9 +199,10 @@ def run_scanner_cycle():
                 "avg_volume_24h": avg_volume_24h, "current_low": curr_low,
                 "current_high": curr_high, "confirmed_spread": confirmed_spread, "avg_atr": avg_atr_24h
             }
-        except: continue
+        except:
+            continue  # Якщо свічки не завантажились, пропустимо аналіз ціни на цьому конкретному колі
 
-        # --- БЛОК 1: МОНІТОРИНГ ТА ЗАКРИТТЯ ПОЗИЦІЙ ---
+        # --- ЕТАП 3: МОНІТОРИНГ ТА ЗАКРИТТЯ ---
         if pair in data["active_trades"]:
             if not real_position_exists and not DRY_RUN:
                 del data["active_trades"][pair]
@@ -194,7 +228,6 @@ def run_scanner_cycle():
                 if not DRY_RUN:
                     try:
                         close_side = 'sell' if direction == "LONG" else 'buy'
-                        real_pos = real_active_positions.get(clean_pair, {})
                         contracts = abs(float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0))
                         
                         if contracts > 0:
@@ -209,10 +242,9 @@ def run_scanner_cycle():
                 del data["active_trades"][pair]
                 print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
 
-        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА АВТОПІДХОПЛЕННЯ ---
+        # --- ЕТАП 4: ПОШУК НОВИХ СИГНАЛІВ НА ВХІД ---
         else:
             if not real_position_exists:
-                # А. Пошук нових сигналів
                 current_volume = market["volume"]
                 avg_volume = market["avg_volume_24h"]
                 volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
@@ -257,33 +289,7 @@ def run_scanner_cycle():
                         "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
             
-            elif real_position_exists:
-                # Б. АВТОПІДХОПЛЕННЯ
-                real_pos = real_active_positions[clean_pair]
-                p_size = float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0)
-                
-                direction = "SHORT" if (p_size < 0 or real_pos.get('side') == 'short') else "LONG"
-                
-                real_entry_price = float(real_pos.get('entryPrice') or real_pos.get('initialMarginRequirement', current_price) or current_price)
-                if real_entry_price == 0: real_entry_price = current_price
-                
-                tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
-                sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
-                
-                contracts = abs(p_size)
-                est_invested = (contracts * real_entry_price) / LEVERAGE
-                if est_invested <= 0: est_invested = INVEST_PER_TRADE
-
-                print(f"  📥 [АВТОПІДХОПЛЕННЯ] Синхронізовано активну позицію для {pair} з біржі.")
-                data["active_trades"][pair] = {
-                    "pair": pair, "direction": direction, "buy_price": real_entry_price,
-                    "invested_amount": round(est_invested, 2), "take_profit": tp_raw, "stop_loss": sl_raw,
-                    "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
-                }
-                
     save_data(data)
-    
-    # Виводимо лог з фінальним числом підхоплених угод в кінці циклу
     active_count = len(data["active_trades"])
     print(f"⚡ [{datetime.now().strftime('%H:%M:%S')}] Цикл завершено | Позицій в базі бота: {active_count}")
 
