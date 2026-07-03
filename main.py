@@ -97,7 +97,6 @@ def fetch_safe_balance():
         except: time.sleep(1 + random.uniform(0.5, 1.5))
 
 def clean_symbol_name(symbol):
-    """ Витягує тільки чисту назву монети (напр. FET-PERP -> FET, BTC/USDT:USDT -> BTC) """
     if not symbol: return ""
     s = symbol.replace('/', '-').replace('_', '-').replace(':', '-')
     return s.split('-')[0].upper()
@@ -124,11 +123,16 @@ def run_scanner_cycle():
                 real_positions = exchange.fetch_positions(params={'type': 'swap'})
             
             print(f"  🔍 [DEBUG] Знайдено позицій на біржі: {len(real_positions)}")
+            print("  📝 [ДЕТАЛЬНИЙ ДЕБАГ ПОЗИЦІЙ]:")
             
             for pos in real_positions:
                 p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
+                symbol_raw = pos.get('symbol', 'UNKNOWN')
+                clean_name = clean_symbol_name(symbol_raw)
+                
+                print(f"    -> Біржа дала символ: '{symbol_raw}' | Чисте ім'я бота: '{clean_name}' | Розмір: {p_size}")
+                
                 if abs(p_size) > 0:
-                    clean_name = clean_symbol_name(pos['symbol'])
                     real_active_positions[clean_name] = pos
         except Exception as e:
             print(f"  ⚠️ Не вдалося отримати список позицій з біржі: {e}")
@@ -141,13 +145,12 @@ def run_scanner_cycle():
         real_pos = real_active_positions.get(clean_pair)
         real_position_exists = real_pos is not None
 
-        # --- ЕТАП 1: АВТОПІДХОПЛЕННЯ (ПРАЦЮЄ НЕЗАЛЕЖНО ВІД СВІЧОК) ---
+        # --- ЕТАП 1: АВТОПІДХОПЛЕННЯ ---
         if real_position_exists and pair not in data["active_trades"]:
             try:
                 p_size = float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0)
                 direction = "SHORT" if (p_size < 0 or real_pos.get('side') == 'short') else "LONG"
                 
-                # Беремо ціну входу з ордера
                 real_entry_price = float(real_pos.get('entryPrice') or 0)
                 if real_entry_price == 0:
                     try: 
@@ -200,7 +203,7 @@ def run_scanner_cycle():
                 "current_high": curr_high, "confirmed_spread": confirmed_spread, "avg_atr": avg_atr_24h
             }
         except:
-            continue  # Якщо свічки не завантажились, пропустимо аналіз ціни на цьому конкретному колі
+            continue
 
         # --- ЕТАП 3: МОНІТОРИНГ ТА ЗАКРИТТЯ ---
         if pair in data["active_trades"]:
