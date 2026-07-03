@@ -97,9 +97,10 @@ def fetch_safe_balance():
         except: time.sleep(1 + random.uniform(0.5, 1.5))
 
 def clean_symbol_name(symbol):
-    """ Перетворює будь-який формат (BTC/USDT:USDT, BTC-PERP) у чистий вигляд BTCUSDT """
+    """ Витягує тільки назву базової монети (напр. BTC/USDT:USDT -> BTC, FET-PERP -> FET) """
     if not symbol: return ""
-    return symbol.replace('/', '').replace(':', '').replace('-', '').split('_')[0].upper()
+    s = symbol.replace('/', '-').replace('_', '-').replace(':', '-')
+    return s.split('-')[0].upper()
 
 # --- ОСНОВНИЙ МОДУЛЬ АНАЛІЗУ ТА ТОРГІВЛІ ---
 def run_scanner_cycle():
@@ -112,21 +113,14 @@ def run_scanner_cycle():
             print(f"❌ Не вдалося отримати баланс з біржі: {e}")
             return
 
-    active_count = len(data["active_trades"])
-    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій в базі бота: {active_count}")
-
     # Збір реальних позицій з біржі з покращеним ф'ючерсним фільтром
     real_active_positions = {}
     if not DRY_RUN:
         try:
-            # Пробуємо отримати саме ф'ючерси
             real_positions = exchange.fetch_positions(params={'type': 'futures'})
-            
-            # Якщо пусті, робимо фолбек на свопи (перпетуал контракт)
             if not real_positions:
                 real_positions = exchange.fetch_positions(params={'type': 'swap'})
             
-            # Виводимо дебаг у лог для перевірки
             print(f"  🔍 [DEBUG] Знайдено позицій на біржі: {len(real_positions)}")
             
             for pos in real_positions:
@@ -137,6 +131,7 @@ def run_scanner_cycle():
         except Exception as e:
             print(f"  ⚠️ Не вдалося отримати список позицій з біржі: {e}")
 
+    # Оновлюємо кількість угод в базі даних бота ПІСЛЯ синхронізації/автопідхоплення
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
         time.sleep(0.1)
@@ -217,7 +212,7 @@ def run_scanner_cycle():
         # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА АВТОПІДХОПЛЕННЯ ---
         else:
             if not real_position_exists:
-                # А. Шукаємо нові сигнали
+                # А. Пошук нових сигналів
                 current_volume = market["volume"]
                 avg_volume = market["avg_volume_24h"]
                 volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
@@ -279,13 +274,18 @@ def run_scanner_cycle():
                 est_invested = (contracts * real_entry_price) / LEVERAGE
                 if est_invested <= 0: est_invested = INVEST_PER_TRADE
 
-                print(f"  📥 [АВТОПІДХОПЛЕННЯ] Синхронізовано активну позицію {pair} з біржі.")
+                print(f"  📥 [АВТОПІДХОПЛЕННЯ] Синхронізовано активну позицію для {pair} з біржі.")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
                     "invested_amount": round(est_invested, 2), "take_profit": tp_raw, "stop_loss": sl_raw,
                     "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
+                
     save_data(data)
+    
+    # Виводимо лог з фінальним числом підхоплених угод в кінці циклу
+    active_count = len(data["active_trades"])
+    print(f"⚡ [{datetime.now().strftime('%H:%M:%S')}] Цикл завершено | Позицій в базі бота: {active_count}")
 
 # --- БЛОК 3: ТАЙМЕР ТА ЦИКЛ ЗАПУСКУ ---
 if __name__ == "__main__":
