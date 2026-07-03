@@ -112,18 +112,26 @@ def run_scanner_cycle():
             print(f"❌ Не вдалося отримати баланс з біржі: {e}")
             return
 
-    # Перед скануванням рахуємо скільки позицій локально в базі
     active_count = len(data["active_trades"])
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій в базі бота: {active_count}")
 
-    # Збір реальних позицій з біржі з нормалізацією імен
+    # Збір реальних позицій з біржі з покращеним ф'ючерсним фільтром
     real_active_positions = {}
     if not DRY_RUN:
         try:
-            real_positions = exchange.fetch_positions()
+            # Пробуємо отримати саме ф'ючерси
+            real_positions = exchange.fetch_positions(params={'type': 'futures'})
+            
+            # Якщо пусті, робимо фолбек на свопи (перпетуал контракт)
+            if not real_positions:
+                real_positions = exchange.fetch_positions(params={'type': 'swap'})
+            
+            # Виводимо дебаг у лог для перевірки
+            print(f"  🔍 [DEBUG] Знайдено позицій на біржі: {len(real_positions)}")
+            
             for pos in real_positions:
                 p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
-                if abs(p_size) > 0:  # abs(), бо шорти повертаються зі знаком мінус
+                if abs(p_size) > 0:
                     clean_name = clean_symbol_name(pos['symbol'])
                     real_active_positions[clean_name] = pos
         except Exception as e:
@@ -167,7 +175,6 @@ def run_scanner_cycle():
 
         # --- БЛОК 1: МОНІТОРИНГ ТА ЗАКРИТТЯ ПОЗИЦІЙ ---
         if pair in data["active_trades"]:
-            # Якщо локально в базі є, а на біржі позицію вже закрито руками/тригером — прибираємо з бази
             if not real_position_exists and not DRY_RUN:
                 del data["active_trades"][pair]
                 continue
@@ -192,7 +199,6 @@ def run_scanner_cycle():
                 if not DRY_RUN:
                     try:
                         close_side = 'sell' if direction == "LONG" else 'buy'
-                        # Закриваємо ТОЧНИЙ об'єм контракту з біржі
                         real_pos = real_active_positions.get(clean_pair, {})
                         contracts = abs(float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0))
                         
@@ -211,7 +217,7 @@ def run_scanner_cycle():
         # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА АВТОПІДХОПЛЕННЯ ---
         else:
             if not real_position_exists:
-                # А. Пошук нових сигналів (якщо позиції немає ні локально, ні на біржі)
+                # А. Шукаємо нові сигнали
                 current_volume = market["volume"]
                 avg_volume = market["avg_volume_24h"]
                 volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
@@ -257,7 +263,7 @@ def run_scanner_cycle():
                     }
             
             elif real_position_exists:
-                # Б. АВТОПІДХОПЛЕННЯ: якщо ордер є на біржі, але бот його «забув» або не мав у базі
+                # Б. АВТОПІДХОПЛЕННЯ
                 real_pos = real_active_positions[clean_pair]
                 p_size = float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0)
                 
