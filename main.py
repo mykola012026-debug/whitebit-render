@@ -11,10 +11,10 @@ SCAN_MARKETS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "FET/USDT:USDT", 
     "ONDO/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "RENDER/USDT:USDT", "LINK/USDT:USDT"
 ]
-TAKE_PROFIT_PCT = 0.05      # 5% руху ціни (Тейк став більшим)
-STOP_LOSS_PCT = 0.035       # 3.5% руху ціни (Даємо позиції "дихати")
+TAKE_PROFIT_PCT = 0.05      # 5% руху ціни
+STOP_LOSS_PCT = 0.035       # 3.5% руху ціни
 VOLUME_MULTIPLIER = 2.2     # Вхід ТІЛЬКИ якщо об'єм у 2.2 рази вищий за норму
-ANOMALY_COEF = 2.5          # Жорсткий фільтр: якщо свічка більша за норму в 2.5 рази — вхід ЗАБОРОНЕНО
+ANOMALY_COEF = 2.5          # Якщо свічка більша за норму в 2.5 рази — вхід ЗАБОРОНЕНО
 INVEST_PER_TRADE = 5.5      
 LEVERAGE = 3
 DRY_RUN = False 
@@ -96,14 +96,10 @@ def fetch_safe_balance():
         try: return exchange.fetch_balance()
         except: time.sleep(1 + random.uniform(0.5, 1.5))
 
-def clean_whitebit_price(pair, price):
-    """ Жорстке коригування контрактних цін WhiteBIT (х100) """
-    if not price: return 0.0
-    val = float(price)
-    if pair.startswith("BTC") and val > 400000: val /= 100.0
-    elif pair.startswith("ETH") and val > 15000: val /= 100.0
-    elif pair.startswith("SOL") and val > 500: val /= 100.0
-    return val
+def clean_symbol_name(symbol):
+    """ Перетворює будь-який формат (BTC/USDT:USDT, BTC-PERP) у чистий вигляд BTCUSDT """
+    if not symbol: return ""
+    return symbol.replace('/', '').replace(':', '').replace('-', '').split('_')[0].upper()
 
 # --- ОСНОВНИЙ МОДУЛЬ АНАЛІЗУ ТА ТОРГІВЛІ ---
 def run_scanner_cycle():
@@ -116,47 +112,50 @@ def run_scanner_cycle():
             print(f"❌ Не вдалося отримати баланс з біржі: {e}")
             return
 
+    # Перед скануванням рахуємо скільки позицій локально в базі
     active_count = len(data["active_trades"])
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] Скан 15m | Вільний баланс: {data['balance_usdt']:.2f} USDT | Позицій в базі бота: {active_count}")
 
+    # Збір реальних позицій з біржі з нормалізацією імен
     real_active_positions = {}
     if not DRY_RUN:
         try:
             real_positions = exchange.fetch_positions()
             for pos in real_positions:
                 p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
-                if p_size > 0:
-                    real_active_positions[pos['symbol']] = pos
+                if abs(p_size) > 0:  # abs(), бо шорти повертаються зі знаком мінус
+                    clean_name = clean_symbol_name(pos['symbol'])
+                    real_active_positions[clean_name] = pos
         except Exception as e:
             print(f"  ⚠️ Не вдалося отримати список позицій з біржі: {e}")
 
     for pair in SCAN_MARKETS:
         free_balance = data["balance_usdt"]
         time.sleep(0.1)
-        
-        real_position_exists = pair in real_active_positions
+
+        clean_pair = clean_symbol_name(pair)
+        real_position_exists = clean_pair in real_active_positions
 
         try:
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=98)
             if not candles or len(candles) < 98: continue
-            
-            # Парсимо та чистимо ціни свічок від х100 множника WhiteBIT
-            c_open = clean_whitebit_price(pair, candles[-2][1])
-            c_high = clean_whitebit_price(pair, candles[-2][2])
-            c_low = clean_whitebit_price(pair, candles[-2][3])
-            c_close = clean_whitebit_price(pair, candles[-2][4])
+
+            c_open = float(candles[-2][1])
+            c_high = float(candles[-2][2])
+            c_low = float(candles[-2][3])
+            c_close = float(candles[-2][4])
             c_vol = float(candles[-2][5])
 
-            curr_low = clean_whitebit_price(pair, candles[-1][3])
-            curr_high = clean_whitebit_price(pair, candles[-1][2])
-            current_price = clean_whitebit_price(pair, candles[-1][4])
+            curr_low = float(candles[-1][3])
+            curr_high = float(candles[-1][2])
+            current_price = float(candles[-1][4])
 
             past_volumes = [float(candle[5]) for candle in candles[:-2]]
             avg_volume_24h = sum(past_volumes) / len(past_volumes)
-            
-            past_atr = [abs(clean_whitebit_price(pair, c[2]) - clean_whitebit_price(pair, c[3])) for c in candles[:-2]]
+
+            past_atr = [abs(float(c[2]) - float(c[3])) for c in candles[:-2]]
             avg_atr_24h = sum(past_atr) / len(past_atr)
-            
+
             confirmed_spread = abs(c_high - c_low)
 
             market = {
@@ -166,9 +165,9 @@ def run_scanner_cycle():
             }
         except: continue
 
-        # --- БЛОК 1: МОНІТОРИНГ ЛОКАЛЬНИХ ПОЗИЦІЙ ---
+        # --- БЛОК 1: МОНІТОРИНГ ТА ЗАКРИТТЯ ПОЗИЦІЙ ---
         if pair in data["active_trades"]:
-            # Якщо локально в базі є, а на біржі позицію вже закрито руками/біржею — видаляємо з бази
+            # Якщо локально в базі є, а на біржі позицію вже закрито руками/тригером — прибираємо з бази
             if not real_position_exists and not DRY_RUN:
                 del data["active_trades"][pair]
                 continue
@@ -189,61 +188,95 @@ def run_scanner_cycle():
             if closed:
                 pnl = invested * ((exit_p - p_in) / p_in if direction == "LONG" else (p_in - exit_p) / p_in)
                 if DRY_RUN: data["balance_usdt"] += (invested + pnl)
-                
+
                 if not DRY_RUN:
                     try:
                         close_side = 'sell' if direction == "LONG" else 'buy'
-                        exchange.create_order(pair, 'market', close_side, exchange.amount_to_precision(pair, invested * LEVERAGE / current_price))
-                    except: pass
+                        # Закриваємо ТОЧНИЙ об'єм контракту з біржі
+                        real_pos = real_active_positions.get(clean_pair, {})
+                        contracts = abs(float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0))
+                        
+                        if contracts > 0:
+                            exchange.create_order(pair, 'market', close_side, exchange.amount_to_precision(pair, contracts))
+                        else:
+                            exchange.create_order(pair, 'market', close_side, exchange.amount_to_precision(pair, invested * LEVERAGE / current_price))
+                    except Exception as close_err: 
+                        print(f"  ❌ Помилка виконання ордера закриття на біржі: {close_err}")
 
                 trade.update({"status": reason, "exit_price": exit_p, "close_time": time.strftime("%Y-%m-%d %H:%M:%S"), "pnl": pnl})
                 data["history"].append(trade)
                 del data["active_trades"][pair]
                 print(f"  🏁 Закрито {pair}! Результат: {pnl:+.2f} USDT ({reason})")
 
-        # --- БЛОК 2: ПОШУК СИГНАЛІВ (ВХІД ТІЛЬКИ ЯКЩО НЕМАЄ РЕАЛЬНОЇ ПОЗИЦІЇ) ---
-        elif not real_position_exists:
-            current_volume = market["volume"]
-            avg_volume = market["avg_volume_24h"]
-            volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
-            is_green_candle = market["close_price"] > market["open_price"]
-            overextended = market["confirmed_spread"] > (market["avg_atr"] * ANOMALY_COEF)
+        # --- БЛОК 2: ПОШУК СИГНАЛІВ ТА АВТОПІДХОПЛЕННЯ ---
+        else:
+            if not real_position_exists:
+                # А. Пошук нових сигналів (якщо позиції немає ні локально, ні на біржі)
+                current_volume = market["volume"]
+                avg_volume = market["avg_volume_24h"]
+                volume_spike = current_volume >= (avg_volume * VOLUME_MULTIPLIER)
+                is_green_candle = market["close_price"] > market["open_price"]
+                overextended = market["confirmed_spread"] > (market["avg_atr"] * ANOMALY_COEF)
 
-            if volume_spike and not overextended and free_balance >= 5.0:
-                direction = "LONG" if is_green_candle else "SHORT"
-                real_entry_price = current_price
+                if volume_spike and not overextended and free_balance >= 5.0:
+                    direction = "LONG" if is_green_candle else "SHORT"
+                    real_entry_price = current_price
 
-                if not DRY_RUN:
-                    try:
-                        print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair}...")
-                        side = 'buy' if direction == "LONG" else 'sell'
-                        try: exchange.set_leverage(LEVERAGE, pair)
-                        except: pass
+                    if not DRY_RUN:
+                        try:
+                            print(f"  📢 [РЕАЛ] Вхід у {direction} по {pair}...")
+                            side = 'buy' if direction == "LONG" else 'sell'
+                            try: exchange.set_leverage(LEVERAGE, pair)
+                            except: pass
 
-                        market_info = exchange.market(pair)
-                        min_amount = market_info['limits']['amount']['min']
+                            market_info = exchange.market(pair)
+                            min_amount = market_info['limits']['amount']['min']
 
-                        amount_to_buy = (INVEST_PER_TRADE * LEVERAGE) / current_price
-                        if amount_to_buy < min_amount: amount_to_buy = min_amount
+                            amount_to_buy = (INVEST_PER_TRADE * LEVERAGE) / current_price
+                            if amount_to_buy < min_amount: amount_to_buy = min_amount
 
-                        formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
-                        if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
+                            formatted_amount = exchange.amount_to_precision(pair, amount_to_buy)
+                            if ((float(formatted_amount) * current_price) / LEVERAGE) > free_balance: continue
 
-                        exchange.create_order(pair, 'market', side, formatted_amount)
-                        
-                    except Exception as e:
-                        print(f"  ❌ Помилка входу: {e}")
-                        continue
-                else:
-                    data["balance_usdt"] -= INVEST_PER_TRADE
+                            exchange.create_order(pair, 'market', side, formatted_amount)
 
+                        except Exception as e:
+                            print(f"  ❌ Помилка входу: {e}")
+                            continue
+                    else:
+                        data["balance_usdt"] -= INVEST_PER_TRADE
+
+                    tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
+                    sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+
+                    print(f"  🔥 ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.4f}, SL: {sl_raw:.4f}, TP: {tp_raw:.4f})")
+                    data["active_trades"][pair] = {
+                        "pair": pair, "direction": direction, "buy_price": real_entry_price,
+                        "invested_amount": INVEST_PER_TRADE, "take_profit": tp_raw, "stop_loss": sl_raw,
+                        "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+            
+            elif real_position_exists:
+                # Б. АВТОПІДХОПЛЕННЯ: якщо ордер є на біржі, але бот його «забув» або не мав у базі
+                real_pos = real_active_positions[clean_pair]
+                p_size = float(real_pos.get('contracts', 0) or real_pos.get('size', 0) or 0)
+                
+                direction = "SHORT" if (p_size < 0 or real_pos.get('side') == 'short') else "LONG"
+                
+                real_entry_price = float(real_pos.get('entryPrice') or real_pos.get('initialMarginRequirement', current_price) or current_price)
+                if real_entry_price == 0: real_entry_price = current_price
+                
                 tp_raw = real_entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
                 sl_raw = real_entry_price * (1 - STOP_LOSS_PCT if direction == "LONG" else 1 + STOP_LOSS_PCT)
+                
+                contracts = abs(p_size)
+                est_invested = (contracts * real_entry_price) / LEVERAGE
+                if est_invested <= 0: est_invested = INVEST_PER_TRADE
 
-                print(f"  🔥 ВХІД {direction} НА {pair}! (Вхід: {real_entry_price:.4f}, SL: {sl_raw:.4f}, TP: {tp_raw:.4f})")
+                print(f"  📥 [АВТОПІДХОПЛЕННЯ] Синхронізовано активну позицію {pair} з біржі.")
                 data["active_trades"][pair] = {
                     "pair": pair, "direction": direction, "buy_price": real_entry_price,
-                    "invested_amount": INVEST_PER_TRADE, "take_profit": tp_raw, "stop_loss": sl_raw,
+                    "invested_amount": round(est_invested, 2), "take_profit": tp_raw, "stop_loss": sl_raw,
                     "status": "OPEN", "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
     save_data(data)
@@ -262,6 +295,6 @@ if __name__ == "__main__":
                 try: 
                     run_scanner_cycle()
                 except Exception as main_e: 
-                    print("🚨 Помилка в циклі виконання.")
+                    print(f"🚨 Помилка в циклі виконання: {main_e}")
         if now.minute not in [0, 15, 30, 45]: last_processed_minute = -1
         time.sleep(0.5)
