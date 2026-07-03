@@ -16,14 +16,13 @@ ANOMALY_COEF = 2.5          # Заборона входу, якщо свічка
 INVEST_PER_TRADE = 5.5      # Чиста інвестиція в одну угоду (USDT)
 LEVERAGE = 3                # Кредитне плече
 
-# --- ІНІЦІАЛІЗАЦІЯ API (WhiteBIT під твій Суб-рахунок) ---
+# --- ІНІЦІАЛІЗАЦІЯ API (WhiteBIT під твій Суб-рахунок без collateral) ---
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
     'secret': '4ff8480b5bb8914e4dacf7ac40401762',
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'futures', 
-        'account-level': 'collateral'
+        'defaultType': 'swap'  # Стандарт CCXT для безстрокових ф'ючерсів WhiteBIT
     }
 })
 
@@ -48,7 +47,12 @@ def run_scanner_cycle():
     # 2. БЕЗПЕЧНЕ ОТРИМАННЯ АКТИВНИХ ПОЗИЦІЙ
     real_positions = {}
     try:
-        positions_raw = exchange.fetch_positions(params={'type': 'futures'}) or exchange.fetch_positions(params={'type': 'swap'})
+        # Для режиму swap використовуємо стандартний fetch_positions
+        positions_raw = exchange.fetch_positions()
+        if not positions_raw:
+            # Спроба з параметрами, якщо біржа вимагає явного типу
+            positions_raw = exchange.fetch_positions(params={'type': 'swap'})
+            
         for pos in positions_raw:
             p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
             # Мікро-допуск (> 0.000001) щоб бачити навіть лоти 0.01 на тестах
@@ -107,7 +111,7 @@ def run_scanner_cycle():
                     close_side = 'sell' if direction == "LONG" else 'buy'
                     try:
                         exchange.create_order(pair, 'market', close_side, exchange.amount_to_precision(pair, abs(p_size)))
-                        print(f"🏁 Попозицію по {pair} успішно закрито.")
+                        print(f"🏁 Позицію по {pair} успішно закрито.")
                     except Exception as order_close_err:
                         print(f"❌ Не вдалося виконати ордер закриття для {pair}: {order_close_err}")
                 
@@ -153,8 +157,6 @@ def run_scanner_cycle():
                     print(f"❌ Помилка відкриття ордера для {pair}: {order_open_err}")
 
         except Exception as e:
-            # Помилка на одній парі (наприклад, пропав інтернет на мить або лагає один інструмент)
-            # виводиться в консоль, але цикл спокійно йде до наступної пари з SCAN_MARKETS
             print(f"⚠️ [ПОМИЛКА ПАРИ] Збій обробки ринку {pair}: {e}")
             continue
 
@@ -163,7 +165,7 @@ def run_scanner_cycle():
 
 # --- ГОЛОВНИЙ ТАЙМЕР (СПАТИ ДО СВІЧКИ) ---
 if __name__ == "__main__":
-    print("🤖 Бот-Снайпер ініціалізований. Працює автономно по API.")
+    print("🤖 Бот-Снайпер ініціалізований. Працює автономно по API (режим Swap).")
     try: 
         exchange.load_markets()
         print("✅ Специфікації ринків завантажені.")
