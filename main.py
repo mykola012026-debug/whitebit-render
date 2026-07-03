@@ -18,7 +18,7 @@ ANOMALY_COEF = 2.5          # Якщо свічка більша за норму
 INVEST_PER_TRADE = 5.5      
 LEVERAGE = 3
 DRY_RUN = False 
-RESET_DATA = False
+RESET_DATA = True
 
 # --- ІНІЦІАЛІЗАЦІЯ API ВІД WHITEBIT ---
 exchange_config = {
