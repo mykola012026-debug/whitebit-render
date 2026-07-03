@@ -15,7 +15,7 @@ ANOMALY_COEF = 2.5
 INVEST_PER_TRADE = 5.5
 LEVERAGE = 3
 
-# ==================== API КЛЮЧІ (тестовий субрахунок) ====================
+# ==================== API (тестовий субрахунок) ====================
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
     'secret': '4ff8480b5bb8914e4dacf7ac40401762',
@@ -33,40 +33,42 @@ def clean_symbol_name(symbol):
 def run_scanner_cycle():
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ЦИКЛУ СКАНИРУВАННЯ ---")
 
-    # === БАЛАНС ===
+    # === 1. БАЛАНС З ДІАГНОСТИКОЮ ===
     free_balance = INVEST_PER_TRADE
     try:
-        balances = exchange.fetch_balance(params={'type': 'swap'})
+        print("🔍 Спроба 1: fetch_balance() без параметрів")
+        balances = exchange.fetch_balance()
         free_balance = float(balances.get('free', {}).get('USDT', 0.0))
-        
-        if free_balance < 1:
-            balances2 = exchange.fetch_balance(params={'account': 'collateral'})
-            free_balance = float(balances2.get('free', {}).get('USDT', 0.0))
-            
-        print(f"💰 Вільний баланс (collateral): {free_balance:.2f} USDT")
-    except Exception as e:
-        print(f"⚠️ [ПОМИЛКА БАЛАНСУ] {e}")
-        print(f"ℹ️ Продовжуємо з дефолтом: {free_balance} USDT")
+        print(f"✅ Баланс: {free_balance:.2f} USDT")
+    except Exception as e1:
+        print(f"❌ Помилка 1: {e1}")
+        try:
+            print("🔍 Спроба 2: fetch_balance з params")
+            balances = exchange.fetch_balance(params={'type': 'swap'})
+            free_balance = float(balances.get('free', {}).get('USDT', 0.0))
+            print(f"✅ Баланс (спроба 2): {free_balance:.2f} USDT")
+        except Exception as e2:
+            print(f"❌ Помилка 2: {e2}")
 
-    # === ПОЗИЦІЇ ===
+    # === 2. АКТИВНІ ПОЗИЦІЇ З ДІАГНОСТИКОЮ ===
     real_positions = {}
     try:
-        positions_raw = exchange.fetch_positions(params={'type': 'swap'})
-        
+        print("🔍 Спроба отримання позицій...")
+        positions_raw = exchange.fetch_positions()
+        print(f"Отримано рядків від біржі: {len(positions_raw)}")
+
         for pos in positions_raw:
-            p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
+            p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or pos.get('info', {}).get('size', 0) or 0)
             if abs(p_size) > 0.000001:
                 clean_name = clean_symbol_name(pos.get('symbol'))
                 real_positions[clean_name] = pos
+                print(f"   ✅ Знайдено активну позицію: {clean_name} | size={p_size}")
 
-        print(f"📊 Активних позицій на біржі: {len(real_positions)}")
-        if real_positions:
-            for name, p in real_positions.items():
-                print(f"   • {name} | {p.get('side', 'unknown').upper()} | Об'єм: {p.get('contracts') or p.get('size')}")
+        print(f"📊 Активних позицій після обробки: {len(real_positions)}")
     except Exception as e:
         print(f"⚠️ [ПОМИЛКА ПОЗИЦІЙ] {e}")
 
-    # === СКАНУВАННЯ РИНКУ ===
+    # === 3. СКАНУВАННЯ РИНКУ (без змін) ===
     for pair in SCAN_MARKETS:
         time.sleep(0.1)
         clean_pair = clean_symbol_name(pair)
@@ -79,15 +81,14 @@ def run_scanner_cycle():
 
             current_price = float(candles[-1][4])
 
-            # БЛОК ПРОДАЖУ (МОНІТОРИНГ)
+            # БЛОК ЗАКРИТТЯ
             if has_position:
                 pos = real_positions[clean_pair]
                 p_size = float(pos.get('contracts', 0) or pos.get('size', 0) or 0)
-                direction = "LONG" if (p_size > 0 or pos.get('side') == 'long') else "SHORT"
+                direction = "LONG" if (p_size > 0 or str(pos.get('side')).lower() == 'long') else "SHORT"
                 entry_price = float(pos.get('entryPrice', 0))
 
-                if entry_price == 0: 
-                    print(f"⚠️ {pair}: нульова ціна входу")
+                if entry_price == 0:
                     continue
 
                 tp_price = entry_price * (1 + TAKE_PROFIT_PCT if direction == "LONG" else 1 - TAKE_PROFIT_PCT)
@@ -96,62 +97,49 @@ def run_scanner_cycle():
                 should_close = False
                 reason = ""
                 if direction == "LONG":
-                    if current_price >= tp_price: should_close, reason = True, "TAKE_PROFIT 🟢"
-                    elif current_price <= sl_price: should_close, reason = True, "STOP_LOSS 🔴"
+                    if current_price >= tp_price: should_close, reason = True, "TAKE_PROFIT"
+                    elif current_price <= sl_price: should_close, reason = True, "STOP_LOSS"
                 else:
-                    if current_price <= tp_price: should_close, reason = True, "TAKE_PROFIT 🟢"
-                    elif current_price >= sl_price: should_close, reason = True, "STOP_LOSS 🔴"
+                    if current_price <= tp_price: should_close, reason = True, "TAKE_PROFIT"
+                    elif current_price >= sl_price: should_close, reason = True, "STOP_LOSS"
 
                 if should_close:
                     print(f"🚨 [ЗАКРИТТЯ] {pair} -> {reason}")
-                    close_side = 'sell' if direction == "LONG" else 'buy'
                     try:
+                        close_side = 'sell' if direction == "LONG" else 'buy'
                         exchange.create_order(pair, 'market', close_side, exchange.amount_to_precision(pair, abs(p_size)))
-                        print(f"🏁 Позицію {pair} закрито")
+                        print(f"🏁 {pair} закрито")
                     except Exception as err:
                         print(f"❌ Помилка закриття: {err}")
                 continue
 
             # БЛОК ВХОДУ
             c_open, c_high, c_low, c_close, c_vol = [float(candles[-2][i]) for i in range(1, 6)]
-
             past_candles = candles[:-2]
-            avg_volume_24h = sum(float(c[5]) for c in past_candles) / len(past_candles)
-            avg_atr_24h = sum(abs(float(c[2]) - float(c[3])) for c in past_candles) / len(past_candles)
-            confirmed_spread = abs(c_high - c_low)
+            avg_volume = sum(float(c[5]) for c in past_candles) / len(past_candles)
+            avg_atr = sum(abs(float(c[2]) - float(c[3])) for c in past_candles) / len(past_candles)
 
-            volume_spike = c_vol >= (avg_volume_24h * VOLUME_MULTIPLIER)
-            overextended = confirmed_spread > (avg_atr_24h * ANOMALY_COEF)
+            if (c_vol >= avg_volume * VOLUME_MULTIPLIER and 
+                abs(c_high - c_low) <= avg_atr * ANOMALY_COEF and 
+                free_balance >= INVEST_PER_TRADE):
 
-            if volume_spike and not overextended and free_balance >= INVEST_PER_TRADE:
-                trade_direction = "LONG" if c_close > c_open else "SHORT"
-                side = 'buy' if trade_direction == "LONG" else 'sell'
+                direction = "LONG" if c_close > c_open else "SHORT"
+                side = 'buy' if direction == "LONG" else 'sell'
+                print(f"🎯 [СИГНАЛ ВХІД] {pair} -> {direction}")
 
-                print(f"🎯 [СИГНАЛ] {pair} -> {trade_direction}")
-
-                amount_to_buy = (INVEST_PER_TRADE * LEVERAGE) / current_price
-
+                amount = (INVEST_PER_TRADE * LEVERAGE) / current_price
                 try:
-                    market_info = exchange.market(pair)
-                    min_amount = market_info['limits']['amount']['min']
-                    if amount_to_buy < min_amount:
-                        amount_to_buy = min_amount
+                    exchange.set_leverage(LEVERAGE, pair)
                 except:
                     pass
-
-                try: 
-                    exchange.set_leverage(LEVERAGE, pair)
-                except: 
-                    pass
-
                 try:
-                    exchange.create_order(pair, 'market', side, exchange.amount_to_precision(pair, amount_to_buy))
-                    print(f"🔥 Вхід виконано по {pair} ({trade_direction})")
+                    exchange.create_order(pair, 'market', side, exchange.amount_to_precision(pair, amount))
+                    print(f"🔥 Вхід по {pair} виконано")
                 except Exception as order_err:
-                    print(f"❌ Помилка ордера {pair}: {order_err}")
+                    print(f"❌ Помилка входу: {order_err}")
 
         except Exception as e:
-            print(f"⚠️ [ПОМИЛКА ПАРИ] {pair}: {e}")
+            print(f"⚠️ Помилка пари {pair}: {e}")
             continue
 
     print(f"⚡ [{datetime.now().strftime('%H:%M:%S')}] --- ЦИКЛ ЗАВЕРШЕНО ---")
@@ -159,26 +147,24 @@ def run_scanner_cycle():
 
 # ==================== ЗАПУСК ====================
 if __name__ == "__main__":
-    print("🤖 Бот-Снайпер (тестовий субрахунок) запущений")
-    try: 
+    print("🤖 Бот запущений на тестовому субрахунку")
+    try:
         exchange.load_markets()
-        print("✅ Ринки завантажені")
-    except Exception as e: 
+        print("✅ Ринки завантажено")
+    except Exception as e:
         print(f"⚠️ Помилка ринків: {e}")
 
-    last_processed_minute = -1
-
+    last_minute = -1
     while True:
         now = datetime.now()
-        if now.minute in [0, 15, 30, 45] and now.minute != last_processed_minute:
+        if now.minute in [0, 15, 30, 45] and now.minute != last_minute:
             if now.second >= 2:
-                last_processed_minute = now.minute
-                try: 
+                last_minute = now.minute
+                try:
                     run_scanner_cycle()
-                except Exception as e: 
-                    print(f"🚨 Критична помилка: {e}")
-
-        if now.minute not in [0, 15, 30, 45]: 
-            last_processed_minute = -1
+                except Exception as e:
+                    print(f"🚨 Критична помилка циклу: {e}")
+        else:
+            last_minute = -1 if now.minute not in [0, 15, 30, 45] else last_minute
 
         time.sleep(0.5)
