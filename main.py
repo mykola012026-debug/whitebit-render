@@ -23,7 +23,6 @@ exchange = ccxt.whitebit({
 })
 
 def safe_float(value, default=0.0):
-    """Безпечне перетворення в float"""
     try:
         if value is None:
             return default
@@ -34,7 +33,7 @@ def safe_float(value, default=0.0):
 def run_scanner_cycle():
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ПОВНОГО ДІАГНОСТИЧНОГО ЦИКЛУ ---")
 
-    # ==================== 1. ПЕРЕВІРКА БАЛАНСІВ (3 ВАРІАНТИ) ====================
+    # ==================== 1. ПЕРЕВІРКА БАЛАНСІВ (ТВІЙ ОРИГІНАЛЬНИЙ ВАРІАНТ) ====================
     print("\n--- 🔍 [КРОК 1] ЗАПИТИ БАЛАНСІВ ---")
     free_balance = 0.0
 
@@ -49,7 +48,7 @@ def run_scanner_cycle():
     except Exception as e:
         print(f"   ❌ Спосіб А видав помилку API: {e}")
 
-    # Спосіб Б: Торговий баланс (Trade)
+    # Спосіб Б: Торговий баланс (Trade) - Твій робочий спосіб!
     try:
         exchange.options['accountsByType'] = {'spot': 'trade'}
         bal_trade = exchange.fetch_balance({'type': 'spot'})
@@ -73,11 +72,11 @@ def run_scanner_cycle():
 
     print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
 
-    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ (3 ВАРІАНТИ) ====================
+    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ (З ВИПРАВЛЕННЯМ НАЗВИ МЕТОДУ) ====================
     print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ---")
     real_positions = {}
 
-    # Варіант Позицій №1: Стандартний через CCXT з фільтром пар
+    # Варіант Позицій №1
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         print("   🤖 Варіант №1 (CCXT fetch_positions з SCAN_MARKETS)...")
@@ -93,7 +92,7 @@ def run_scanner_cycle():
     except Exception as e:
         print(f"   ❌ Варіант №1 видав помилку API: {e}")
 
-    # Варіант Позицій №2: Загальний CCXT запит без фільтрації
+    # Варіант Позицій №2
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         print("   🤖 Варіант №2 (CCXT fetch_positions без фільтра)...")
@@ -109,18 +108,17 @@ def run_scanner_cycle():
     except Exception as e:
         print(f"   ❌ Варіант №2 видав помилку API: {e}")
 
-    # Варіант Позицій №3: Прямий ф'ючерсний ендпоінт WhiteBIT (в обхід CCXT)
+    # Варіант Позицій №3 (ВИПРАВЛЕНИЙ МЕТОД WHITEBIT)
     try:
-        print("   🤖 Варіант №3 (Прямий privatePostCollateralAccountPositions)...")
-        pos_v3 = exchange.privatePostCollateralAccountPositions()
-        
+        print("   🤖 Варіант №3 (Прямий privatePostCollateralAccountPositionsList)...")
+        # Додали 'List' на кінці, щоб метод існував в архітектурі CCXT
+        pos_v3 = exchange.privatePostCollateralAccountPositionsList()
+
         positions_list = []
         if isinstance(pos_v3, list):
             positions_list = pos_v3
         elif isinstance(pos_v3, dict):
             positions_list = pos_v3.get('result', []) or pos_v3.get('data', []) or list(pos_v3.values())
-            if not isinstance(positions_list, list):
-                positions_list = [pos_v3]
 
         print(f"      👉 Роспарсено рядків з сирих даних: {len(positions_list)}")
         for pos in positions_list:
@@ -135,13 +133,19 @@ def run_scanner_cycle():
     except Exception as e:
         print(f"   ❌ Варіант №3 видав помилку API: {e}")
 
-    print(f"📊 РЕЗУЛЬТАТ: Всього унікальних монет зафіксовано в позиціях: {len(real_positions)}")
+    # Чітка відповідь у лог, якщо позицій немає
+    if len(real_positions) == 0:
+        print("   ℹ️ [ЛОГ] Жодних відкритих позицій на WhiteBIT не виявлено.")
+    else:
+        print(f"📊 РЕЗУЛЬТАТ: Всього унікальних монет зафіксовано в позиціях: {len(real_positions)}")
 
-    # ==================== 3. СКАНУВАННЯ РИНКУ ТА ВХІД ====================
+    # ==================== 3. СКАНУВАННЯ РИНКУ (ОБ'ЄДНАННЯ МОНЕТ БЕЗ АНОМАЛІЙ) ====================
     print("\n--- 🔍 [КРОК 3] АНАЛІЗ РИНКУ (15m СВІЧКИ) ---")
+    no_anomaly_pairs = []  # Для красивого групування
+
     for pair in SCAN_MARKETS:
         time.sleep(0.2)
-        
+
         clean_pair_name = pair.replace('/', '-').replace('_', '-').replace(':', '-').split('-')[0].upper()
         has_position = clean_pair_name in real_positions
 
@@ -166,7 +170,8 @@ def run_scanner_cycle():
 
             required_vol = avg_volume * VOLUME_MULTIPLIER
             if c_vol < required_vol:
-                print(f"   📊 {pair}: Аномалій не виявлено. Об'єм={c_vol:.1f} | Потрібно={required_vol:.1f} (Сер={avg_volume:.1f})")
+                # Замість флуду в лог, збираємо сюди
+                no_anomaly_pairs.append(pair)
                 continue
 
             if free_balance < INVEST_PER_TRADE:
@@ -180,7 +185,7 @@ def run_scanner_cycle():
             amount_usdt = INVEST_PER_TRADE * LEVERAGE
             amount_contracts = amount_usdt / current_price
             precise_amount = exchange.amount_to_precision(pair, amount_contracts)
-            
+
             try:
                 print(f"      🚀 Надсилання маркет-ордера: {side.upper()} {precise_amount} по {pair}...")
                 order = exchange.create_order(
@@ -198,11 +203,15 @@ def run_scanner_cycle():
             print(f"   ⚠️ {pair}: Помилка обробки даних ринку: {e}")
             continue
 
+    # Виводимо спокійні пари одним рядком
+    if no_anomaly_pairs:
+        print(f"   📊 Аномалій не виявлено по парах: {', '.join(no_anomaly_pairs)}")
+
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- ЦИКЛ ЗАВЕРШЕНО ---")
 
 
 if __name__ == "__main__":
-    print("🤖 Бот запущений у режимі максимального логування")
+    print("🤖 Бот запущений у режимі maximal логування")
     try:
         exchange.load_markets()
         print("✅ Специфікації ринків ф'ючерсів завантажено успішно")
@@ -213,7 +222,7 @@ if __name__ == "__main__":
     last_minute = -1
     while True:
         now = datetime.now()
-        
+
         if now.minute % 15 == 0 and now.minute != last_minute:
             if now.second >= 2:
                 last_minute = now.minute
@@ -224,5 +233,5 @@ if __name__ == "__main__":
         else:
             if now.minute % 15 != 0:
                 last_minute = -1
-                
+
         time.sleep(0.5)
