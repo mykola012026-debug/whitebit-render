@@ -88,18 +88,18 @@ def run_scanner_cycle():
                 print(f"🎚️ Недостатньо свічок для пари {pair}")
                 continue
 
-            current_price = float(candles[-1][4]) # Поточна ціна (ціна закриття незавершеної свічки)
+            current_price = float(candles[-1][4]) # Поточна ціна (ціна закриття незавершеної свічки, індекс 4)
 
             if has_position:
                 # Позиція вже відкрита — пропускаємо блок входу для цієї пари
                 continue
 
             # Блок аналізу входу (остання повністю закрита свічка — це індекс -2)
-            c_open = float(candles[-2][1])
-            c_close = float(candles[-2][4])
-            c_vol = float(candles[-2][5])
+            c_open = float(candles[-2][1])   # Індекс 1 — ціна відкриття
+            c_close = float(candles[-2][4])  # Індекс 4 — ціна закриття
+            c_vol = float(candles[-2][5])    # Індекс 5 — об'єм свічки
 
-            # Розрахунок середнього об'єму за попередні свічки (без поточної та останньої закритиї)
+            # Розрахунок середнього об'єму за попередні свічки (без поточної та останньої закритої)
             past_volumes = [float(c[5]) for c in candles[:-2]]
             avg_volume = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
 
