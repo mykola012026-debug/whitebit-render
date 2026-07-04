@@ -226,4 +226,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"💥 Критичний збій під час виконання циклу: {e}")
         else:
-if now.minute % 15 != 0:last_minute = -1time.sleep(0.5)
+if now.minute % 15 != 0:
+last_minute = -1
+
+time.sleep(0.5)
