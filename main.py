@@ -93,12 +93,16 @@ def run_scanner_cycle():
         print(f"   ❌ Варіант №1 видав помилку API: {e}")
 
     # Варіант Позицій №2
+        # Варіант Позицій №2
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         print("   🤖 Варіант №2 (CCXT fetch_positions без фільтра)...")
         pos_v2 = exchange.fetch_positions()
         print(f"      👉 Отримано рядків від API: {len(pos_v2)}")
         for pos in pos_v2:
+            # ОЦЕЙ РЯДОК ПОКАЖЕ НАМ ВСЕ ВСЕРЕДИНІ ЛОГУ:
+            print(f"      🔍 Сирі дані позиції від API: {pos}")
+            
             p_size = safe_float(pos.get('contracts') or pos.get('size') or pos.get('info', {}).get('size', 0))
             symbol = pos.get('symbol') or pos.get('info', {}).get('marketId', 'Невідомо')
             if abs(p_size) > 0.000001:
@@ -107,6 +111,7 @@ def run_scanner_cycle():
                 real_positions[clean_name] = pos
     except Exception as e:
         print(f"   ❌ Варіант №2 видав помилку API: {e}")
+
 
     # Варіант Позицій №3 (ВИПРАВЛЕНИЙ МЕТОД WHITEBIT)
     try:
