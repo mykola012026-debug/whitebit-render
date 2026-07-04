@@ -21,9 +21,9 @@ exchange = ccxt.whitebit({
     'secret': '4ff8480b5bb8914e4dacf7ac40401762',
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',        # Працюємо з безстроковими ф'ючерсами
+        'defaultType': 'swap',        
         'accountsByType': {
-            'swap': 'collateral',     # Підключаємо ф'ючерсний баланс (Collateral) WhiteBIT
+            'swap': 'collateral',     
         }
     }
 })
@@ -46,25 +46,23 @@ def run_scanner_cycle():
         print("🔍 Запит балансу з рахунку Collateral...")
         balances = exchange.fetch_balance()
         
-        # Беремо чистий вільний баланс USDT
         free_usdt = balances.get('USDT', {}).get('free', 0.0)
         free_balance = safe_float(free_usdt)
         print(f"✅ Реальний баланс USDT (Free): {free_balance:.2f}")
         
     except Exception as e:
         print(f"⚠️ Помилка отримання балансу: {e}")
-        return  # Без балансу перериваємо цикл, щоб уникнути помилок ордерів
+        return  
 
     # === 2. ОТРИМАННЯ РЕАЛЬНИХ ПОЗИЦІЙ ===
     real_positions = {}
     try:
         print("🔍 Запит активних ф'ючерсних позицій...")
-        # Запитуємо позиції конкретно для нашого списку маркетів
         positions_raw = exchange.fetch_positions(SCAN_MARKETS)
 
         for pos in positions_raw:
             p_size = safe_float(pos.get('contracts') or pos.get('size'))
-            market_symbol = pos.get('symbol')  # Отримуємо точний уніфікований символ (напр. BTC/USDT:USDT)
+            market_symbol = pos.get('symbol')  
             
             if abs(p_size) > 0.000001 and market_symbol:
                 real_positions[market_symbol] = pos
@@ -76,37 +74,30 @@ def run_scanner_cycle():
 
     # === 3. СКАНУВАННЯ СВІЧОК ТА ВХІД В УГОДИ ===
     for pair in SCAN_MARKETS:
-        time.sleep(0.2)  # Невелика затримка для стабільності запитів до WhiteBIT
+        time.sleep(0.2)  
         
-        # Перевірка наявності позиції за точним збігом повного символу
         has_position = pair in real_positions
 
         try:
-            # Запитуємо 100 свічок, щоб гарантовано мати 98 історичних
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=100)
             if not candles or len(candles) < 98:
                 print(f"🎚️ Недостатньо свічок для пари {pair}")
                 continue
 
-            current_price = float(candles[-1][4]) # Поточна ціна (ціна закриття незавершеної свічки, індекс 4)
+            current_price = float(candles[-1][4]) 
 
             if has_position:
-                # Позиція вже відкрита — пропускаємо блок входу для цієї пари
                 continue
 
-            # Блок аналізу входу (остання повністю закрита свічка — це індекс -2)
-            c_open = float(candles[-2][1])   # Індекс 1 — ціна відкриття
-            c_close = float(candles[-2][4])  # Індекс 4 — ціна закриття
-            c_vol = float(candles[-2][5])    # Індекс 5 — об'єм свічки
+            c_open = float(candles[-2][1])   
+            c_close = float(candles[-2][4])  
+            c_vol = float(candles[-2][5])    
 
-            # Розрахунок середнього об'єму за попередні свічки (без поточної та останньої закритої)
             past_volumes = [float(c[5]) for c in candles[:-2]]
             avg_volume = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
 
-            # Перевірка аномального об'єму
             if c_vol >= avg_volume * VOLUME_MULTIPLIER:
                 
-                # Перевіряємо, чи вистачає реального балансу на угоду
                 if free_balance < INVEST_PER_TRADE:
                     print(f"📉 Сигнал по {pair} пропущено: на балансі {free_balance:.2f} USDT, а потрібно {INVEST_PER_TRADE} USDT")
                     continue
@@ -115,11 +106,9 @@ def run_scanner_cycle():
                 side = 'buy' if direction == "LONG" else 'sell'
                 print(f"🎯 [СИГНАЛ] {pair} -> {direction} | Об'єм свічки: {c_vol:.1f} (Середній: {avg_volume:.1f})")
 
-                # Розрахунок кількості контрактів для купівлі з урахуванням плеча
                 amount_usdt = INVEST_PER_TRADE * LEVERAGE
                 amount_contracts = amount_usdt / current_price
                 
-                # Перетворюємо об'єм у рядок з потрібною біржі точністю знаків після коми
                 precise_amount = exchange.amount_to_precision(pair, amount_contracts)
                 
                 try:
@@ -128,11 +117,10 @@ def run_scanner_cycle():
                         symbol=pair,
                         type='market',
                         side=side,
-                        amount=float(precise_amount) # Перетворюємо назад у float для API
+                        amount=float(precise_amount) 
                     )
                     print(f"🔥 Вхід успішний! ID ордера: {order.get('id')}")
                     
-                    # Локально зменшуємо баланс для поточного циклу
                     free_balance -= INVEST_PER_TRADE
                     
                 except Exception as err:
@@ -157,7 +145,6 @@ if __name__ == "__main__":
     last_minute = -1
     while True:
         now = datetime.now()
-        # Перевірка на 15, 30, 45 та 00 хвилинах (на 2-й секунді для формування свічки)
         if now.minute in [0, 15, 30, 45] and now.minute != last_minute:
             if now.second >= 2:
                 last_minute = now.minute
