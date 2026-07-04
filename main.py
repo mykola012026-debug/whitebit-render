@@ -114,7 +114,6 @@ def run_scanner_cycle():
         print("   🤖 Варіант №3 (Прямий privatePostCollateralAccountPositions)...")
         pos_v3 = exchange.privatePostCollateralAccountPositions()
         
-        # Перевірка структури відповіді
         positions_list = []
         if isinstance(pos_v3, list):
             positions_list = pos_v3
@@ -165,20 +164,18 @@ def run_scanner_cycle():
             past_volumes = [float(c[5]) for c in candles[:-2]]
             avg_volume = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
 
-            # Логування поточного стану об'ємів для прозорості
             required_vol = avg_volume * VOLUME_MULTIPLIER
             if c_vol < required_vol:
-                print(f"   📊 {pair}: Аномалій не виявлено. Об'єм={c_vol:.1f} | Потрібно для сигналу={required_vol:.1f} (Середній={avg_volume:.1f})")
+                print(f"   📊 {pair}: Аномалій не виявлено. Об'єм={c_vol:.1f} | Потрібно={required_vol:.1f} (Сер={avg_volume:.1f})")
                 continue
 
-            # Якщо аномальний об'єм підтверджено
             if free_balance < INVEST_PER_TRADE:
-                print(f"   🎯 [СИГНАЛ] {pair}: Виявлено аномальний об'єм! Але ВХІД ПРОПУЩЕНО через брак балансу ({free_balance:.2f} USDT)")
+                print(f"   🎯 [СИГНАЛ] {pair}: Виявлено об'єм! Але ВХІД ПРОПУЩЕНО через брак балансу ({free_balance:.2f} USDT)")
                 continue
 
             direction = "LONG" if c_close > c_open else "SHORT"
             side = 'buy' if direction == "LONG" else 'sell'
-            print(f"   🎯 [СИГНАЛ] {pair} -> Напрямок: {direction} | Об'єм: {c_vol:.1f} (Плече: {LEVERAGE}x)")
+            print(f"   🎯 [СИГНАЛ] {pair} -> Напрямок: {direction} | Об'єм: {c_vol:.1f}")
 
             amount_usdt = INVEST_PER_TRADE * LEVERAGE
             amount_contracts = amount_usdt / current_price
@@ -217,7 +214,6 @@ if __name__ == "__main__":
     while True:
         now = datetime.now()
         
-        # Перевірка через математичний залишок для виключення синтаксичних багів
         if now.minute % 15 == 0 and now.minute != last_minute:
             if now.second >= 2:
                 last_minute = now.minute
@@ -226,7 +222,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"💥 Критичний збій під час виконання циклу: {e}")
         else:
-if now.minute % 15 != 0:
-last_minute = -1
-
-time.sleep(0.5)
+            if now.minute % 15 != 0:
+                last_minute = -1
+                
+        time.sleep(0.5)
