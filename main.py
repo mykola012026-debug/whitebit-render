@@ -16,7 +16,6 @@ INVEST_PER_TRADE = 5.5
 LEVERAGE = 3
 
 # ==================== НАЛАШТУВАННЯ API ====================
-# УВАГА: Нікому не показуйте свої API-ключі!
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
     'secret': '4ff8480b5bb8914e4dacf7ac40401762',
@@ -39,7 +38,7 @@ def safe_float(value, default=0.0):
         return default
 
 def run_scanner_cycle():
-    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ЦИКЛУ СКАНИРУВАННЯ ---")
+    print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ЦИКЛУ СКАНУВАННЯ ---")
 
     # === 1. ОТРИМАННЯ РЕАЛЬНОГО БАЛАНСУ ===
     free_balance = 0.0
@@ -54,7 +53,7 @@ def run_scanner_cycle():
         
     except Exception as e:
         print(f"⚠️ Помилка отримання балансу: {e}")
-        return  # Якщо баланс не отримано, перериваємо цикл, щоб уникнути помилок ордерів
+        return  # Без балансу перериваємо цикл, щоб уникнути помилок ордерів
 
     # === 2. ОТРИМАННЯ РЕАЛЬНИХ ПОЗИЦІЙ ===
     real_positions = {}
@@ -79,11 +78,11 @@ def run_scanner_cycle():
     for pair in SCAN_MARKETS:
         time.sleep(0.2)  # Невелика затримка для стабільності запитів до WhiteBIT
         
-        # Перевірка наявності позиції за ТОЧНИМ збігом повного символу
+        # Перевірка наявності позиції за точним збігом повного символу
         has_position = pair in real_positions
 
         try:
-            # Запитуємо з запасом (100 свічок), щоб гарантовано мати 98 історичних
+            # Запитуємо 100 свічок, щоб гарантовано мати 98 історичних
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=100)
             if not candles or len(candles) < 98:
                 print(f"🎚️ Недостатньо свічок для пари {pair}")
@@ -92,8 +91,7 @@ def run_scanner_cycle():
             current_price = float(candles[-1][4]) # Поточна ціна (ціна закриття незавершеної свічки)
 
             if has_position:
-                # Позиція вже є — пропускаємо блок входу для цієї пари
-                # Тут за бажанням можна додати логіку закриття позиції по TP/SL
+                # Позиція вже відкрита — пропускаємо блок входу для цієї пари
                 continue
 
             # Блок аналізу входу (остання повністю закрита свічка — це індекс -2)
@@ -101,7 +99,7 @@ def run_scanner_cycle():
             c_close = float(candles[-2][4])
             c_vol = float(candles[-2][5])
 
-            # Розрахунок середнього об'єму за попередні 96 свічок (без поточної та останньої закритої)
+            # Розрахунок середнього об'єму за попередні свічки (без поточної та останньої закритиї)
             past_volumes = [float(c[5]) for c in candles[:-2]]
             avg_volume = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
 
@@ -121,7 +119,7 @@ def run_scanner_cycle():
                 amount_usdt = INVEST_PER_TRADE * LEVERAGE
                 amount_contracts = amount_usdt / current_price
                 
-                # Перетворюємо об'єм у рядок з потрібною біржі точністю (кількістю знаків після коми)
+                # Перетворюємо об'єм у рядок з потрібною біржі точністю знаків після коми
                 precise_amount = exchange.amount_to_precision(pair, amount_contracts)
                 
                 try:
@@ -134,7 +132,7 @@ def run_scanner_cycle():
                     )
                     print(f"🔥 Вхід успішний! ID ордера: {order.get('id')}")
                     
-                    # Локально зменшуємо баланс, щоб бот не зайшов у іншу пару на цьому ж колі, якщо грошей впритул
+                    # Локально зменшуємо баланс для поточного циклу
                     free_balance -= INVEST_PER_TRADE
                     
                 except Exception as err:
