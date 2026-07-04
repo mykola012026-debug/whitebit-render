@@ -79,6 +79,7 @@ def run_scanner_cycle():
         has_position = pair in real_positions
 
         try:
+            # Запитуємо 100 свічок, щоб гарантовано мати 98 історичних
             candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=100)
             if not candles or len(candles) < 98:
                 print(f"🎚️ Недостатньо свічок для пари {pair}")
@@ -89,6 +90,7 @@ def run_scanner_cycle():
             if has_position:
                 continue
 
+            # Беремо дані з останньої закритиї свічки (індекс -2)
             c_open = float(candles[-2][1])   
             c_close = float(candles[-2][4])  
             c_vol = float(candles[-2][5])    
@@ -145,7 +147,9 @@ if __name__ == "__main__":
     last_minute = -1
     while True:
         now = datetime.now()
-        if now.minute in [0, 15, 30, 45] and now.minute != last_minute:
+        
+        # Перевіряємо, чи ділитися поточна хвилина на 15 без залишку (тобто 0, 15, 30, 45)
+        if now.minute % 15 == 0 and now.minute != last_minute:
             if now.second >= 2:
                 last_minute = now.minute
                 try:
@@ -153,6 +157,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"💥 Критичний збій усередині циклу: {e}")
         else:
-            if now.minute not in:
+            if now.minute % 15 != 0:
                 last_minute = -1
+                
         time.sleep(0.5)
