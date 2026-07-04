@@ -8,9 +8,9 @@ SCAN_MARKETS = [
     "ONDO/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "RENDER/USDT:USDT", "LINK/USDT:USDT"
 ]
 
-VOLUME_MULTIPLIER = 2.2
+VOLUME_MULTIPLIER = 1.6
 INVEST_PER_TRADE = 5.5
-LEVERAGE = 3
+LEVERAGE = 10
 
 # ==================== НАЛАШТУВАННЯ API ====================
 exchange = ccxt.whitebit({
