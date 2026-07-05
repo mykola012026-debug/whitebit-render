@@ -33,33 +33,22 @@ def safe_float(value, default=0.0):
 def run_scanner_cycle():
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ПОВНОГО ДІАГНОСТИЧНОГО ЦИКЛУ ---")
 
-    # ==================== 1. ПЕРЕВІРКА БАЛАНСІВ (ТВІЙ ОРИГІНАЛЬНИЙ ВАРІАНТ) ====================
+    # ==================== 1. ПЕРЕВІРКА БАЛАНСІВ ====================
     print("\n--- 🔍 [КРОК 1] ЗАПИТИ БАЛАНСІВ ---")
     free_balance = 0.0
 
-    # Спосіб А: Ф'ючерсний/Колатеральний рахунок
-    try:
-        exchange.options['accountsByType'] = {'swap': 'collateral'}
-        bal_collateral = exchange.fetch_balance({'type': 'swap'})
-        usdt_collateral = bal_collateral.get('USDT', {}).get('free', 0.0)
-        print(f"   🔹 Спосіб А (Collateral): {usdt_collateral} USDT вільних")
-        if safe_float(usdt_collateral) > 0:
-            free_balance = safe_float(usdt_collateral)
-    except Exception as e:
-        print(f"   ❌ Спосіб А видав помилку API: {e}")
-
-    # Спосіб Б: Торговий баланс (Trade) - Твій робочий спосіб!
+    # Спосіб Б: Торговий баланс (Trade) - Основний робочий спосіб
     try:
         exchange.options['accountsByType'] = {'spot': 'trade'}
         bal_trade = exchange.fetch_balance({'type': 'spot'})
         usdt_trade = bal_trade.get('USDT', {}).get('free', 0.0)
         print(f"   🔹 Спосіб Б (Trade/Spot): {usdt_trade} USDT вільних")
-        if free_balance == 0.0 and safe_float(usdt_trade) > 0:
+        if safe_float(usdt_trade) > 0:
             free_balance = safe_float(usdt_trade)
     except Exception as e:
         print(f"   ❌ Спосіб Б видав помилку API: {e}")
 
-    # Спосіб В: Головний загальний баланс (Main)
+    # Спосіб В: Головний загальний баланс (Main) - Резервний варіант (Fallback)
     try:
         exchange.options['accountsByType'] = {'spot': 'main'}
         bal_main = exchange.fetch_balance({'type': 'main'})
@@ -72,19 +61,17 @@ def run_scanner_cycle():
 
     print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
 
-    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ (З ВИПРАВЛЕННЯМ НАЗВИ МЕТОДУ) ====================
+    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ ====================
     print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ---")
     real_positions = {}
 
-    # Варіант Позицій №1
-     # Варіант Позицій №1
+    # Варіант Позицій №1 (Фільтрований за списком)
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         print("   🤖 Варіант №1 (CCXT fetch_positions з SCAN_MARKETS)...")
         pos_v1 = exchange.fetch_positions(SCAN_MARKETS)
         print(f"      👉 Отримано рядків від API: {len(pos_v1)}")
         for pos in pos_v1:
-            # Читаємо розмір з урахуванням специфіки WhiteBIT
             p_size = safe_float(pos.get('contracts') or pos.get('info', {}).get('amount'))
             symbol = pos.get('symbol', 'Невідомо')
             if abs(p_size) > 0.000001:
@@ -94,14 +81,13 @@ def run_scanner_cycle():
     except Exception as e:
         print(f"   ❌ Варіант №1 видав помилку API: {e}")
 
-    # Варіант Позицій №2
+    # Варіант Позицій №2 (Повний сканер акаунта)
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         print("   🤖 Варіант №2 (CCXT fetch_positions без фільтра)...")
         pos_v2 = exchange.fetch_positions()
         print(f"      👉 Отримано рядків від API: {len(pos_v2)}")
         for pos in pos_v2:
-            # Читаємо розмір з урахуванням специфіки WhiteBIT
             p_size = safe_float(pos.get('contracts') or pos.get('info', {}).get('amount'))
             symbol = pos.get('symbol') or pos.get('info', {}).get('market', 'Невідомо')
             if abs(p_size) > 0.000001:
@@ -110,45 +96,19 @@ def run_scanner_cycle():
                 real_positions[clean_name] = pos
     except Exception as e:
         print(f"   ❌ Варіант №2 видав помилку API: {e}")
- 
 
-    # Варіант Позицій №3 (ВИПРАВЛЕНИЙ МЕТОД WHITEBIT)
-    try:
-        print("   🤖 Варіант №3 (Прямий privatePostCollateralAccountPositionsList)...")
-        # Додали 'List' на кінці, щоб метод існував в архітектурі CCXT
-        pos_v3 = exchange.privatePostCollateralAccountPositionsList()
-
-        positions_list = []
-        if isinstance(pos_v3, list):
-            positions_list = pos_v3
-        elif isinstance(pos_v3, dict):
-            positions_list = pos_v3.get('result', []) or pos_v3.get('data', []) or list(pos_v3.values())
-
-        print(f"      👉 Роспарсено рядків з сирих даних: {len(positions_list)}")
-        for pos in positions_list:
-            if not isinstance(pos, dict):
-                continue
-            p_size = safe_float(pos.get('size') or pos.get('contracts') or pos.get('amount', 0))
-            market_id = pos.get('marketId') or pos.get('symbol') or 'Невідомо'
-            if abs(p_size) > 0.000001:
-                print(f"      🎯 Активна позиція (Вар №3): {market_id} | size={p_size}")
-                clean_name = str(market_id).replace('/', '-').replace('_', '-').replace(':', '-').split('-')[0].upper()
-                real_positions[clean_name] = pos
-    except Exception as e:
-        print(f"   ❌ Варіант №3 видав помилку API: {e}")
-
-    # Чітка відповідь у лог, якщо позицій немає
+    # Фінальний звіт по позиціях
     if len(real_positions) == 0:
         print("   ℹ️ [ЛОГ] Жодних відкритих позицій на WhiteBIT не виявлено.")
     else:
         print(f"📊 РЕЗУЛЬТАТ: Всього унікальних монет зафіксовано в позиціях: {len(real_positions)}")
 
-    # ==================== 3. СКАНУВАННЯ РИНКУ (ОБ'ЄДНАННЯ МОНЕТ БЕЗ АНОМАЛІЙ) ====================
+    # ==================== 3. СКАНУВАННЯ РИНКУ ====================
     print("\n--- 🔍 [КРОК 3] АНАЛІЗ РИНКУ (15m СВІЧКИ) ---")
-    no_anomaly_pairs = []  # Для красивого групування
+    no_anomaly_pairs = []
 
     for pair in SCAN_MARKETS:
-        time.sleep(0.2)
+        time.sleep(0.2)  # Захист від лімітів API (Rate Limit)
 
         clean_pair_name = pair.replace('/', '-').replace('_', '-').replace(':', '-').split('-')[0].upper()
         has_position = clean_pair_name in real_positions
@@ -174,7 +134,6 @@ def run_scanner_cycle():
 
             required_vol = avg_volume * VOLUME_MULTIPLIER
             if c_vol < required_vol:
-                # Замість флуду в лог, збираємо сюди
                 no_anomaly_pairs.append(pair)
                 continue
 
@@ -207,7 +166,7 @@ def run_scanner_cycle():
             print(f"   ⚠️ {pair}: Помилка обробки даних ринку: {e}")
             continue
 
-    # Виводимо спокійні пари одним рядком
+    # Вивід спокійних пар одним компактним рядком
     if no_anomaly_pairs:
         print(f"   📊 Аномалій не виявлено по парах: {', '.join(no_anomaly_pairs)}")
 
@@ -227,6 +186,7 @@ if __name__ == "__main__":
     while True:
         now = datetime.now()
 
+        # Запуск кожні 15 хвилин (на 2-й секунді хвилини)
         if now.minute % 15 == 0 and now.minute != last_minute:
             if now.second >= 2:
                 last_minute = now.minute
