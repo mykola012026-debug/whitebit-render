@@ -34,32 +34,38 @@ def run_scanner_cycle():
     print(f"\n⚡ [{datetime.now().strftime('%H:%M:%S')}] --- СТАРТ ПОВНОГО ДІАГНОСТИЧНОГО ЦИКЛУ ---")
 
     # ==================== 1. ПЕРЕВІРКА БАЛАНСІВ ====================
+       # ==================== 1. П П Т Т   Б А Л А Н С С В ====================
     print("\n--- 🔍 [КРОК 1] ЗАПИТИ БАЛАНСІВ ---")
     free_balance = 0.0
 
-    # Спосіб В: Головний загальний баланс (Main) - Основний і найстабільніший
+    # Спосіб В: Головний рахунок (Main)
     try:
         exchange.options['accountsByType'] = {'spot': 'main'}
         bal_main = exchange.fetch_balance({'type': 'main'})
         usdt_main = bal_main.get('USDT', {}).get('free', 0.0)
-        print(f"   🔹 Спосіб В (Main рахунок): {usdt_main} USDT вільних")
         if safe_float(usdt_main) > 0:
             free_balance = safe_float(usdt_main)
-    except Exception as e:
-        print(f"   ❌ Спосіб В видав помилку API: {e}")
+            print(f"   🔹 Отримано баланс (Main): {free_balance:.2f} USDT")
+    except Exception:
+        pass  # Мовчки йдемо далі, якщо API WhiteBIT тимчасово недоступне
 
-    # Спосіб Б: Торговий баланс (Trade) - Резервний (Fallback)
-    try:
-        exchange.options['accountsByType'] = {'spot': 'trade'}
-        bal_trade = exchange.fetch_balance({'type': 'spot'})
-        usdt_trade = bal_trade.get('USDT', {}).get('free', 0.0)
-        print(f"   🔹 Спосіб Б (Trade/Spot): {usdt_trade} USDT вільних")
-        if free_balance == 0.0 and safe_float(usdt_trade) > 0:
-            free_balance = safe_float(usdt_trade)
-    except Exception as e:
-        print(f"   ❌ Спосіб Б видав помилку API: {e}")
+    # Спосіб Б: Торговий баланс (Trade) - Спрацює як підстраховка, якщо Main промовчав
+    if free_balance == 0.0:
+        try:
+            exchange.options['accountsByType'] = {'spot': 'trade'}
+            bal_trade = exchange.fetch_balance({'type': 'spot'})
+            usdt_trade = bal_trade.get('USDT', {}).get('free', 0.0)
+            if safe_float(usdt_trade) > 0:
+                free_balance = safe_float(usdt_trade)
+                print(f"   🔹 Отримано баланс (Trade/Spot): {free_balance:.2f} USDT")
+        except Exception:
+            pass  # Теж мовчимо
 
-    print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
+    # Якщо раптом взагалі магія і обидва способи видали 0 (наприклад, повний збій API)
+    if free_balance == 0.0:
+        print("   ⚠️ [ПОПЕРЕДЖЕННЯ] Не вдалося отримати актуальний баланс. Використовуємо 0.0")
+    else:
+        print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
 
     # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ ====================
     print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ---")
