@@ -37,27 +37,27 @@ def run_scanner_cycle():
     print("\n--- 🔍 [КРОК 1] ЗАПИТИ БАЛАНСІВ ---")
     free_balance = 0.0
 
-    # Спосіб Б: Торговий баланс (Trade) - Основний робочий спосіб
-    try:
-        exchange.options['accountsByType'] = {'spot': 'trade'}
-        bal_trade = exchange.fetch_balance({'type': 'spot'})
-        usdt_trade = bal_trade.get('USDT', {}).get('free', 0.0)
-        print(f"   🔹 Спосіб Б (Trade/Spot): {usdt_trade} USDT вільних")
-        if safe_float(usdt_trade) > 0:
-            free_balance = safe_float(usdt_trade)
-    except Exception as e:
-        print(f"   ❌ Спосіб Б видав помилку API: {e}")
-
-    # Спосіб В: Головний загальний баланс (Main) - Резервний варіант (Fallback)
+    # Спосіб В: Головний загальний баланс (Main) - Основний і найстабільніший
     try:
         exchange.options['accountsByType'] = {'spot': 'main'}
         bal_main = exchange.fetch_balance({'type': 'main'})
         usdt_main = bal_main.get('USDT', {}).get('free', 0.0)
         print(f"   🔹 Спосіб В (Main рахунок): {usdt_main} USDT вільних")
-        if free_balance == 0.0 and safe_float(usdt_main) > 0:
+        if safe_float(usdt_main) > 0:
             free_balance = safe_float(usdt_main)
     except Exception as e:
         print(f"   ❌ Спосіб В видав помилку API: {e}")
+
+    # Спосіб Б: Торговий баланс (Trade) - Резервний (Fallback)
+    try:
+        exchange.options['accountsByType'] = {'spot': 'trade'}
+        bal_trade = exchange.fetch_balance({'type': 'spot'})
+        usdt_trade = bal_trade.get('USDT', {}).get('free', 0.0)
+        print(f"   🔹 Спосіб Б (Trade/Spot): {usdt_trade} USDT вільних")
+        if free_balance == 0.0 and safe_float(usdt_trade) > 0:
+            free_balance = safe_float(usdt_trade)
+    except Exception as e:
+        print(f"   ❌ Спосіб Б видав помилку API: {e}")
 
     print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
 
@@ -65,37 +65,38 @@ def run_scanner_cycle():
     print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ---")
     real_positions = {}
 
-    # Варіант Позицій №1 (Фільтрований за списком)
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
-        print("   🤖 Варіант №1 (CCXT fetch_positions з SCAN_MARKETS)...")
-        pos_v1 = exchange.fetch_positions(SCAN_MARKETS)
-        print(f"      👉 Отримано рядків від API: {len(pos_v1)}")
-        for pos in pos_v1:
+        print("   🤖 Запит активних позицій через CCXT (fetch_positions)...")
+        positions = exchange.fetch_positions(SCAN_MARKETS)
+        print(f"      👉 Отримано рядків від API: {len(positions)}")
+        
+        for pos in positions:
+            # Читаємо розмір позиції з урахуванням специфіки WhiteBIT
             p_size = safe_float(pos.get('contracts') or pos.get('info', {}).get('amount'))
             symbol = pos.get('symbol', 'Невідомо')
+            
             if abs(p_size) > 0.000001:
-                print(f"      🎯 Активна позиція (Вар №1): {symbol} | size={p_size}")
+                # Визначаємо напрямок позиції (Лонг/Шорт)
+                direction = "📈 LONG" if p_size > 0 else "📉 SHORT"
+                
+                # Витягуємо метрики ціни та PnL
+                entry_price = safe_float(pos.get('entryPrice') or pos.get('info', {}).get('entryPrice'))
+                current_price = safe_float(pos.get('markPrice') or pos.get('info', {}).get('basePrice'))
+                unrealized_pnl = safe_float(pos.get('unrealizedPnl') or pos.get('info', {}).get('pnl'))
+                
+                # Красивий індикатор для PnL (зелений плюс або червоний мінус)
+                pnl_marker = "🟢 +" if unrealized_pnl >= 0 else "🔴 "
+                
+                # Інформативний вивід у лог
+                print(f"      🎯 {symbol} | {direction} | Розмір: {abs(p_size)}")
+                print(f"         Вхід: {entry_price:.4f} -> Поточна: {current_price:.4f} | PnL: {pnl_marker}{unrealized_pnl:.2f} USDT")
+                
                 clean_name = str(symbol).replace('/', '-').replace('_', '-').replace(':', '-').split('-')[0].upper()
                 real_positions[clean_name] = pos
+                
     except Exception as e:
-        print(f"   ❌ Варіант №1 видав помилку API: {e}")
-
-    # Варіант Позицій №2 (Повний сканер акаунта)
-    try:
-        exchange.options['accountsByType'] = {'swap': 'collateral'}
-        print("   🤖 Варіант №2 (CCXT fetch_positions без фільтра)...")
-        pos_v2 = exchange.fetch_positions()
-        print(f"      👉 Отримано рядків від API: {len(pos_v2)}")
-        for pos in pos_v2:
-            p_size = safe_float(pos.get('contracts') or pos.get('info', {}).get('amount'))
-            symbol = pos.get('symbol') or pos.get('info', {}).get('market', 'Невідомо')
-            if abs(p_size) > 0.000001:
-                print(f"      🎯 Активна позиція (Вар №2): {symbol} | size={p_size}")
-                clean_name = str(symbol).replace('/', '-').replace('_', '-').replace(':', '-').split('-')[0].upper()
-                real_positions[clean_name] = pos
-    except Exception as e:
-        print(f"   ❌ Варіант №2 видав помилку API: {e}")
+        print(f"   ❌ Помилка запиту позицій API: {e}")
 
     # Фінальний звіт по позиціях
     if len(real_positions) == 0:
@@ -103,7 +104,7 @@ def run_scanner_cycle():
     else:
         print(f"📊 РЕЗУЛЬТАТ: Всього унікальних монет зафіксовано в позиціях: {len(real_positions)}")
 
-    # ==================== 3. СКАНУВАННЯ РИНКУ ====================
+    # ==================== 3. СКАНУВАННЯ РИНКУ ТА ВХІД ====================
     print("\n--- 🔍 [КРОК 3] АНАЛІЗ РИНКУ (15m СВІЧКИ) ---")
     no_anomaly_pairs = []
 
@@ -174,7 +175,7 @@ def run_scanner_cycle():
 
 
 if __name__ == "__main__":
-    print("🤖 Бот запущений у режимі maximal логування")
+    print("🤖 Бот запущений у режимі інфо-логування позицій")
     try:
         exchange.load_markets()
         print("✅ Специфікації ринків ф'ючерсів завантажено успішно")
