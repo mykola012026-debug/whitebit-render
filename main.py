@@ -17,6 +17,11 @@ STOP_LOSS_PCT = 0.012   # 1.2% (при 10х плечі = -12% від маржі)
 TAKE_PROFIT_PCT = 0.025  # 2.5% (при 10х плечі = +25% від маржі)
 MAX_CANDLE_PCT = 0.025   # 2.5% фільтр перегріву (ігноруємо занадто гігантські свічки)
 
+# Коефіцієнт активації безубитку (0.4 = 40% від цілі Take Profit)
+# При INVEST_PER_TRADE = 5.5 та 10х плечі, TP (+25%) — це ~$1.37 прибутку.
+# Активація безубитку спрацює, коли чистий плюс позиції досягне ~$0.55 USDT.
+BREAKEVEN_TRIGGER_PCT = 0.4  
+
 # ==================== НАЛАШТУВАННЯ API ====================
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
@@ -92,23 +97,70 @@ def run_scanner_cycle():
                 print(f"      🎯 {symbol} | {direction} | Розмір: {abs(p_size)}")
                 print(f"         Вхід: {entry_price:.4f} -> Поточна: {current_price:.4f} | PnL: {pnl_marker}{unrealized_pnl:.2f} USDT")
 
-                # Зберігаємо позицію за її точним системним ім'ям CCXT
+                # Зберігаємо позицію
                 real_positions[symbol] = pos
+
+                # 🔥 ======= ДИНАМІЧНИЙ МОДУЛЬ БЕЗЗБИТКОВОСТІ (BREAKEVEN) =======
+                target_pnl_to_activate = INVEST_PER_TRADE * LEVERAGE * TAKE_PROFIT_PCT * BREAKEVEN_TRIGGER_PCT
+                
+                if unrealized_pnl >= target_pnl_to_activate:
+                    print(f"         🚀 [БЕЗЗБИТОК] {symbol} дав гарний профіт ({unrealized_pnl:.2f} USDT). Перевірка переносу SL...")
+                    
+                    try:
+                        open_orders = exchange.fetch_open_orders(symbol)
+                        has_breakeven_sl = False
+                        old_sl_id = None
+
+                        # Шукаємо поточні стоп-ордери
+                        for order in open_orders:
+                            o_price = float(order.get('stopPrice') or order.get('info', {}).get('stopPrice', 0))
+                            if o_price > 0:
+                                is_long = p_size > 0
+                                # Якщо стоп вже стоїть на рівні входу (або краще) — ігноруємо, він вже в безубитку
+                                if abs(o_price - entry_price) / entry_price < 0.001:
+                                    has_breakeven_sl = True
+                                # Якщо це старий глибокий стоп-лосс (нижче ціни входу для лонга, вище для шорта)
+                                elif (is_long and o_price < entry_price) or (not is_long and o_price > entry_price):
+                                    old_sl_id = order['id']
+
+                        if has_breakeven_sl:
+                            print(f"         🔒 Позиція {symbol} вже надійно захищена в 0. Пропуск.")
+                        else:
+                            # Якщо знайшли старий збитковий стоп — зносимо його
+                            if old_sl_id:
+                                exchange.cancel_order(old_sl_id, symbol)
+                                print(f"         ✅ Старий Stop Loss (ID: {old_sl_id}) скасовано.")
+                                time.sleep(0.2)
+
+                            # Виставляємо новий безубитковий стоп
+                            sl_side = 'sell' if p_size > 0 else 'buy'
+                            precise_entry_price = float(exchange.price_to_precision(symbol, entry_price))
+                            
+                            exchange.create_order(
+                                symbol=symbol,
+                                type='market',
+                                side=sl_side,
+                                amount=abs(float(exchange.amount_to_precision(symbol, p_size))),
+                                params={'stopPrice': precise_entry_price}
+                            )
+                            print(f"         🔥 Новий безубитковий Stop Loss виставлено на рівень: {precise_entry_price}")
+
+                    except Exception as e_be:
+                        print(f"         ❌ Помилка в модулі безубитку для {symbol}: {e_be}")
+                # ===============================================================
 
         # 🔥 АВТОМАТИЧНА ПІДЧИСТКА ОРДЕРІВ-СИРІТ (ДВІРНИК)
         print("   🧹 Перевірка та очищення залишкових ордерів (якщо позицію закрито)...")
         for pair in SCAN_MARKETS:
             if pair not in real_positions:
                 try:
-                    # Шукаємо відкриті ордери по парі, яку вже закрило по SL або TP
                     open_orders = exchange.fetch_open_orders(pair)
                     if open_orders:
                         print(f"      ⚠️ Виявлено {len(open_orders)} залишкові ордери по {pair} без активної позиції. Скасування...")
                         for order in open_orders:
                             exchange.cancel_order(order['id'], pair)
-                            print(f"         ✅ Ордер-привид ID {order['id']} успішно скасовано.")
+                            print(f"         ✅ Ордер-привид ID {order['id']} успешно скасовано.")
                 except Exception:
-                    # Біржа може видати помилку, якщо ордерів немає або вони щойно зникли — ігноруємо
                     pass
 
     except Exception as e:
@@ -126,7 +178,6 @@ def run_scanner_cycle():
     for pair in SCAN_MARKETS:
         time.sleep(0.2)
 
-        # Пряма та надійна перевірка наявності позиції
         if pair in real_positions:
             print(f"   🔒 {pair}: Аналіз входу пропущено. По цій монеті ВЖЕ є відкрита позиція.")
             continue
@@ -142,7 +193,7 @@ def run_scanner_cycle():
             c_close = float(candles[-2][4])
             c_vol = float(candles[-2][5])
 
-            # 1. Фільтр перегріву свічки (захист від покупок на хаях)
+            # 1. Фільтр перегріву свічки
             candle_change = abs(c_close - c_open) / c_open
             if candle_change > MAX_CANDLE_PCT:
                 print(f"   ⚠️ {pair}: Імпульс занадто великий ({candle_change*100:.2f}% > {MAX_CANDLE_PCT*100}%). Ризик розвороту, пропуск.")
@@ -166,7 +217,7 @@ def run_scanner_cycle():
             side = 'buy' if direction == "LONG" else 'sell'
             print(f"   🎯 [СИГНАЛ] {pair} -> Напрямок: {direction} | Об'єм: {c_vol:.1f}")
 
-            # 4. Розрахунок об'єму з урахуванням мінімальних лімітів біржі (Фікс для BTC)
+            # 4. Розрахунок об'єму з урахуванням лімітів
             amount_usdt = INVEST_PER_TRADE * LEVERAGE
             amount_contracts = amount_usdt / current_price
 
@@ -190,11 +241,10 @@ def run_scanner_cycle():
                 )
                 print(f"      🔥 Вхід успішний! ID ордера: {order.get('id')}")
                 free_balance -= INVEST_PER_TRADE
-                
-                # Захист від лімітів перед надсиланням стопів
+
                 time.sleep(0.5)
 
-                # 6. Виставлення захисних ордерів (Stop Loss та Take Profit)
+                # 6. Виставлення початкових Stop Loss та Take Profit
                 sl_side = 'sell' if side == 'buy' else 'buy'
                 tp_side = sl_side
 
@@ -205,7 +255,6 @@ def run_scanner_cycle():
                     sl_price = current_price * (1 + STOP_LOSS_PCT)
                     tp_price = current_price * (1 - TAKE_PROFIT_PCT)
 
-                # Округлюємо ціни стопів під правила біржі
                 precise_sl_price = float(exchange.price_to_precision(pair, sl_price))
                 precise_tp_price = float(exchange.price_to_precision(pair, tp_price))
 
