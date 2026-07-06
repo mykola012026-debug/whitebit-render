@@ -68,8 +68,8 @@ def run_scanner_cycle():
     else:
         print(f"📊 ПРИЙНЯТИЙ ДЛЯ РОЗРАХУНКУ ВХОДУ БАЛАНС: {free_balance:.2f} USDT")
 
-    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ ====================
-    print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ---")
+    # ==================== 2. ПЕРЕВІРКА ПОЗИЦІЙ ТА АВТО-ПІДЧИСТКА ====================
+    print("\n--- 🔍 [КРОК 2] ЗАПИТИ ПОЗИЦІЙ ТА АВТО-ПІДЧИСТКА ---")
     real_positions = {}
 
     try:
@@ -95,8 +95,24 @@ def run_scanner_cycle():
                 # Зберігаємо позицію за її точним системним ім'ям CCXT
                 real_positions[symbol] = pos
 
+        # 🔥 АВТОМАТИЧНА ПІДЧИСТКА ОРДЕРІВ-СИРІТ (ДВІРНИК)
+        print("   🧹 Перевірка та очищення залишкових ордерів (якщо позицію закрито)...")
+        for pair in SCAN_MARKETS:
+            if pair not in real_positions:
+                try:
+                    # Шукаємо відкриті ордери по парі, яку вже закрило по SL або TP
+                    open_orders = exchange.fetch_open_orders(pair)
+                    if open_orders:
+                        print(f"      ⚠️ Виявлено {len(open_orders)} залишкові ордери по {pair} без активної позиції. Скасування...")
+                        for order in open_orders:
+                            exchange.cancel_order(order['id'], pair)
+                            print(f"         ✅ Ордер-привид ID {order['id']} успішно скасовано.")
+                except Exception:
+                    # Біржа може видати помилку, якщо ордерів немає або вони щойно зникли — ігноруємо
+                    pass
+
     except Exception as e:
-        print(f"   ❌ Помилка запиту позицій API: {e}")
+        print(f"   ❌ Помилка запиту позицій або підчистки API: {e}")
 
     if len(real_positions) == 0:
         print("   ℹ️ [ЛОГ] Жодних відкритих позицій на WhiteBIT не виявлено.")
@@ -179,7 +195,6 @@ def run_scanner_cycle():
                 time.sleep(0.5)
 
                 # 6. Виставлення захисних ордерів (Stop Loss та Take Profit)
-                # Для WhiteBIT використовуємо тип 'stop_market' або 'market' із параметром stopPrice
                 sl_side = 'sell' if side == 'buy' else 'buy'
                 tp_side = sl_side
 
@@ -234,7 +249,7 @@ def run_scanner_cycle():
 
 
 if __name__ == "__main__":
-    print("🤖 Бот запущений у режимі автоматичного контролю ризиків (SL/TP)")
+    print("🤖 Бот запущений у режимі автоматичного контролю ризиків та підчистки ордерів")
     try:
         exchange.load_markets()
         print("✅ Специфікації ринків ф'ючерсів завантажено успішно")
