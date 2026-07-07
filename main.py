@@ -18,8 +18,6 @@ TAKE_PROFIT_PCT = 0.025  # 2.5% (при 10х плечі = +25% від маржі
 MAX_CANDLE_PCT = 0.025   # 2.5% фільтр перегріву (ігноруємо занадто гігантські свічки)
 
 # Коефіцієнт активації безубитку (0.4 = 40% від цілі Take Profit)
-# При INVEST_PER_TRADE = 5.5 та 10х плечі, TP (+25%) — це ~$1.37 прибутку.
-# Активація безубитку спрацює, коли чистий плюс позиції досягне ~$0.55 USDT.
 BREAKEVEN_TRIGGER_PCT = 0.4  
 
 # ==================== НАЛАШТУВАННЯ API ====================
@@ -100,12 +98,12 @@ def run_scanner_cycle():
                 # Зберігаємо позицію
                 real_positions[symbol] = pos
 
-                # 🔥 ======= ДИНАМІЧНИЙ МОДУЛЬ БЕЗЗБИТКОВОСТІ (BREAKEVEN) =======
+                # ======= ДИНАМІЧНИЙ МОДУЛЬ БЕЗЗБИТКОВОСТІ (BREAKEVEN) =======
                 target_pnl_to_activate = INVEST_PER_TRADE * LEVERAGE * TAKE_PROFIT_PCT * BREAKEVEN_TRIGGER_PCT
-                
+
                 if unrealized_pnl >= target_pnl_to_activate:
                     print(f"         🚀 [БЕЗЗБИТОК] {symbol} дав гарний профіт ({unrealized_pnl:.2f} USDT). Перевірка переносу SL...")
-                    
+
                     try:
                         open_orders = exchange.fetch_open_orders(symbol)
                         has_breakeven_sl = False
@@ -116,26 +114,22 @@ def run_scanner_cycle():
                             o_price = float(order.get('stopPrice') or order.get('info', {}).get('stopPrice', 0))
                             if o_price > 0:
                                 is_long = p_size > 0
-                                # Якщо стоп вже стоїть на рівні входу (або краще) — ігноруємо, він вже в безубитку
                                 if abs(o_price - entry_price) / entry_price < 0.001:
                                     has_breakeven_sl = True
-                                # Якщо це старий глибокий стоп-лосс (нижче ціни входу для лонга, вище для шорта)
                                 elif (is_long and o_price < entry_price) or (not is_long and o_price > entry_price):
                                     old_sl_id = order['id']
 
                         if has_breakeven_sl:
                             print(f"         🔒 Позиція {symbol} вже надійно захищена в 0. Пропуск.")
                         else:
-                            # Якщо знайшли старий збитковий стоп — зносимо його
                             if old_sl_id:
                                 exchange.cancel_order(old_sl_id, symbol)
                                 print(f"         ✅ Старий Stop Loss (ID: {old_sl_id}) скасовано.")
                                 time.sleep(0.2)
 
-                            # Виставляємо новий безубитковий стоп
                             sl_side = 'sell' if p_size > 0 else 'buy'
                             precise_entry_price = float(exchange.price_to_precision(symbol, entry_price))
-                            
+
                             exchange.create_order(
                                 symbol=symbol,
                                 type='market',
@@ -147,9 +141,8 @@ def run_scanner_cycle():
 
                     except Exception as e_be:
                         print(f"         ❌ Помилка в модулі безубитку для {symbol}: {e_be}")
-                # ===============================================================
 
-        # 🔥 АВТОМАТИЧНА ПІДЧИСТКА ОРДЕРІВ-СИРІТ (ДВІРНИК)
+        # АВТОМАТИЧНА ПІДЧИСТКА ОРДЕРІВ-СИРІТ (ДВІРНИК)
         print("   🧹 Перевірка та очищення залишкових ордерів (якщо позицію закрито)...")
         for pair in SCAN_MARKETS:
             if pair not in real_positions:
@@ -172,7 +165,7 @@ def run_scanner_cycle():
         print(f"📊 РЕЗУЛЬТАТ: Всього унікальних монет зафіксовано в позиціях: {len(real_positions)}")
 
     # ==================== 3. СКАНУВАННЯ РИНКУ ТА ВХІД ====================
-    print("\n--- 🔍 [КРОК 3] АНАЛІЗ РИНКУ (15m СВІЧКИ) ---")
+    print("\n--- 🔍 [КРОК 3] АНАЛІЗ РИНКУ (15m СВІЧКИ + ФІЛЬТРИ EMA/RSI) ---")
     no_anomaly_pairs = []
 
     for pair in SCAN_MARKETS:
@@ -183,15 +176,61 @@ def run_scanner_cycle():
             continue
 
         try:
-            candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=100)
-            if not candles or len(candles) < 98:
-                print(f"   ⚠️ {pair}: Недостатньо історичних свічок ({len(candles) if candles else 0}/98). Пропуск.")
+            # Збільшено ліміт до 150 свічок для точного розрахунку довгої EMA
+            candles = exchange.fetch_ohlcv(pair, timeframe='15m', limit=150)
+            if not candles or len(candles) < 120:
+                print(f"   ⚠️ {pair}: Недостатньо історичних свічок ({len(candles) if candles else 0}/120). Пропуск.")
                 continue
 
-            current_price = float(candles[-1][4])
+            closes = [float(c[4]) for c in candles]
+            volumes = [float(c[5]) for c in candles]
+
+            current_price = closes[-1]
             c_open = float(candles[-2][1])
             c_close = float(candles[-2][4])
             c_vol = float(candles[-2][5])
+
+            # --- ФУНКЦІЯ РОЗРАХУНКУ EMA ---
+            def calculate_ema(prices, period):
+                ema = [prices[0]]
+                k = 2 / (period + 1)
+                for price in prices[1:]:
+                    ema.append(price * k + ema[-1] * (1 - k))
+                return ema
+
+            # --- ФУНКЦІЯ РОЗРАХУНКУ RSI ---
+            def calculate_rsi(prices, period=14):
+                gains = []
+                losses = []
+                for i in range(1, len(prices)):
+                    diff = prices[i] - prices[i-1]
+                    if diff > 0:
+                        gains.append(diff)
+                        losses.append(0)
+                    else:
+                        gains.append(0)
+                        losses.append(abs(diff))
+                
+                avg_gain = sum(gains[:period]) / period
+                avg_loss = sum(losses[:period]) / period
+                
+                if avg_loss == 0:
+                    return 100
+                
+                for i in range(period, len(gains)):
+                    avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+                    avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+                
+                if avg_loss == 0:
+                    return 100
+                rs = avg_gain / avg_loss
+                return 100 - (100 / (1 + rs))
+
+            # Рахуємо індикатори на момент закриття останньої свічки (індекс -2)
+            ema12 = calculate_ema(closes[:-1], 12)[-1]
+            ema26 = calculate_ema(closes[:-1], 26)[-1]
+            ema100 = calculate_ema(closes[:-1], 100)[-1]
+            rsi14 = calculate_rsi(closes[:-1], 14)
 
             # 1. Фільтр перегріву свічки
             candle_change = abs(c_close - c_open) / c_open
@@ -200,7 +239,7 @@ def run_scanner_cycle():
                 continue
 
             # 2. Перевірка аномального об'єму
-            past_volumes = [float(c[5]) for c in candles[:-2]]
+            past_volumes = volumes[:-2]
             avg_volume = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
             required_vol = avg_volume * VOLUME_MULTIPLIER
 
@@ -208,16 +247,35 @@ def run_scanner_cycle():
                 no_anomaly_pairs.append(pair)
                 continue
 
-            # 3. Перевірка балансу
+            # Визначаємо напрямок за закриттям свічки
+            candle_direction = "LONG" if c_close > c_open else "SHORT"
+
+            # 3. ФІЛЬТРАЦІЯ ЗА EMA ТА RSI (Захист від розпилу)
+            if candle_direction == "LONG":
+                # Умови для LONG: ціна вище за EMA-100, швидка EMA вище середньої, RSI не перегрітий (< 65)
+                if c_close > ema100 and ema12 > ema26 and rsi14 < 65:
+                    pass
+                else:
+                    print(f"   ❌ {pair}: Об'єм виявлено, але LONG скасовано індикаторами. RSI: {rsi14:.1f}, Ціна: {c_close:.4f} (EMA100: {ema100:.4f})")
+                    continue
+
+            elif candle_direction == "SHORT":
+                # Умови для SHORT: ціна нижче за EMA-100, швидка EMA нижче середньої, RSI не на дні (> 35)
+                if c_close < ema100 and ema12 < ema26 and rsi14 > 35:
+                    pass
+                else:
+                    print(f"   ❌ {pair}: Об'єм виявлено, але SHORT скасовано індикаторами. RSI: {rsi14:.1f}, Ціна: {c_close:.4f} (EMA100: {ema100:.4f})")
+                    continue
+
+            # 4. Перевірка балансу
             if free_balance < INVEST_PER_TRADE:
-                print(f"   🎯 [СИГНАЛ] {pair}: Виявлено об'єм! Але ВХІД ПРОПУЩЕНО через брак балансу ({free_balance:.2f} USDT)")
+                print(f"   🎯 [СИГНАЛ] {pair}: Сигнал підтверджено! Але ВХІД ПРОПУЩЕНО через брак балансу ({free_balance:.2f} USDT)")
                 continue
 
-            direction = "LONG" if c_close > c_open else "SHORT"
-            side = 'buy' if direction == "LONG" else 'sell'
-            print(f"   🎯 [СИГНАЛ] {pair} -> Напрямок: {direction} | Об'єм: {c_vol:.1f}")
+            side = 'buy' if candle_direction == "LONG" else 'sell'
+            print(f"   🚀 [ВХІД] {pair} -> Напрямок: {candle_direction} | Об'єм: {c_vol:.1f} | RSI: {rsi14:.1f}")
 
-            # 4. Розрахунок об'єму з урахуванням лімітів
+            # 5. Розрахунок об'єму з урахуванням лімітів
             amount_usdt = INVEST_PER_TRADE * LEVERAGE
             amount_contracts = amount_usdt / current_price
 
@@ -225,14 +283,13 @@ def run_scanner_cycle():
             min_qty = safe_float(market_info['limits']['amount']['min'], 0.001)
 
             if amount_contracts < min_qty:
-                print(f"   ℹ️ {pair}: Розрахований об'єм {amount_contracts:.6f} менший за мінімальний лот {min_qty}. Округляємо до {min_qty}")
                 amount_contracts = min_qty
 
             precise_amount = exchange.amount_to_precision(pair, amount_contracts)
 
-            # 5. Вхід у позицію
+            # 6. Вхід у позицію
             try:
-                print(f"      🚀 Надсилання маркет-ордера: {side.upper()} {precise_amount} по {pair}...")
+                print(f"      Надсилання маркет-ордера: {side.upper()} {precise_amount} по {pair}...")
                 order = exchange.create_order(
                     symbol=pair,
                     type='market',
@@ -244,11 +301,11 @@ def run_scanner_cycle():
 
                 time.sleep(0.5)
 
-                # 6. Виставлення початкових Stop Loss та Take Profit
+                # Початкові Stop Loss та Take Profit
                 sl_side = 'sell' if side == 'buy' else 'buy'
                 tp_side = sl_side
 
-                if direction == "LONG":
+                if candle_direction == "LONG":
                     sl_price = current_price * (1 - STOP_LOSS_PCT)
                     tp_price = current_price * (1 + TAKE_PROFIT_PCT)
                 else:
