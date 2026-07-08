@@ -144,7 +144,8 @@ def handle_traps_and_timeouts(symbol):
         set_exchange_context()
         order = exchange.fetch_order(trap['order_id'], symbol)
 
-        if order['status'] == 'closed':
+       if order['status'] in ['closed', 'filled']:
+
             print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Лімітка виконана по {symbol}!")
             filled_price = safe_float(order.get('average') or order.get('price') or trap['price'])
             amount = safe_float(order.get('amount', trap['amount']))
