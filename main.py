@@ -87,17 +87,42 @@ def get_position_protection_levels(symbol):
     return tp, sl
 
 def clean_orphan_orders(symbol):
-    """МОДЕРНІЗОВАНИЙ ДВІРНИК: чистить лімітки без сигналу, а також закриває стопи-сироти, якщо позиції немає"""
+    """ІНТЕЛЕКТУАЛЬНИЙ ДВІРНИК: перевіряє доцільність утримання лімітки та зачищає хвости"""
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
         if open_orders:
             for order in open_orders:
-                # 1. Якщо це звичайна лімітка входу (немає stopPrice) і вона не в активних пастках
+                # 1. Робота зі звичайними лімітками на вхід (у них немає stopPrice)
                 if not order.get('stopPrice'):
-                    print(f"🧹 [ДВІРНИК] Очищення лімітки по {symbol}...")
-                    exchange.cancel_order(order['id'], symbol)
-                    print(f"   ✅ Ордер ID {order['id']} скасовано.")
+                    
+                    # Витягуємо свіжу математику ринку, щоб перевірити актуальність сигналу
+                    closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
+                    if closes_15m and len(volumes_15m) >= 21:
+                        ema_12 = calculate_ema(closes_15m, 12)
+                        avg_vol_20 = sum(volumes_15m[-21:-1]) / 20
+                        current_vol = volumes_15m[-2]
+                        global_trend, _ = check_global_trend(symbol)
+                        
+                        vol_ratio = current_vol / avg_vol_20 if avg_vol_20 > 0 else 0
+                        
+                        # Шукаємо причину, чому лімітку треба прибрати
+                        reason = ""
+                        if vol_ratio < VOLUME_MULTIPLIER:
+                            reason = f"аномальний об'єм зник, поточний: {vol_ratio:.2f}x (треба > {VOLUME_MULTIPLIER}x)"
+                        elif global_trend == "LONG_ONLY" and closes_15m[-1] <= ema_12:
+                            reason = f"ціна випала з лонгового тренду нижче EMA-12 ({closes_15m[-1]:.4f})"
+                        elif global_trend == "SHORT_ONLY" and closes_15m[-1] >= ema_12:
+                            reason = f"ціна випала з шортового тренду вище EMA-12 ({closes_15m[-1]:.4f})"
+                        
+                        # Якщо причина знайдена — скасовуємо лімітку з поясненням у лог
+                        if reason:
+                            print(f"🧹 [ДВІРНИК] Скасування лімітки по {symbol} (ID: {order['id']}):")
+                            print(f"   ℹ️ Причина: {reason}.")
+                            exchange.cancel_order(order['id'], symbol)
+                            print(f"   ✅ Лімітку успішно прибрано з ринку.")
+                            if symbol in active_traps: 
+                                del active_traps[symbol]
                 
                 # 2. Якщо це стоп-ордер (є stopPrice), але позиції по монеті вже НЕМАЄ
                 elif order.get('stopPrice'):
@@ -283,7 +308,6 @@ def main_cycle():
                 for symbol in SYMBOLS:
                     trend, last_p = check_global_trend(symbol)
                     
-                    # Витягуємо свіжі дані об'ємів та EMA для звіту
                     closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
                     vol_ratio_str = "0.00x"
                     dev_str = "0.00%"
@@ -312,7 +336,6 @@ def main_cycle():
                         rem_min = max(0.0, rem_time / 60)
                         pos_status = f"ЧЕКАЄ ЛІМІТКА ({active_traps[symbol]['side'].upper()}) по {active_traps[symbol]['price']} (Таймаут через: {rem_min:.1f} хв)"
 
-                    # Виводимо розширений рядок моніторингу
                     print(f"  • {symbol:<15} | Тренд: {trend:<10} | Об'єм: {vol_ratio_str:<6} | До EMA-12: {dev_str:<7} | {pos_status}")
                 
                 print("==================================================================\n")
@@ -320,6 +343,7 @@ def main_cycle():
 
             # --- АНАЛІЗ ТА ТОРГІВЛЯ ---
             for symbol in SYMBOLS:
+                # Двірник тепер розумний: аналізує об'єми та тренд перед видаленням лімітки на вхід
                 clean_orphan_orders(symbol)
 
                 if symbol in real_positions: 
