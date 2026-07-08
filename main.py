@@ -21,12 +21,10 @@ SYMBOLS = [
 TIMEFRAME_TRADE = '15m'
 TIMEFRAME_TREND = '1h'
 
-# --- БЛОК НАЛАШТУВАННЯ РИЗИКІВ ТА ФІЛЬТРІВ ---
-BASE_POSITION_VOLUME = 20.0  # Об'єм ордера в USDT
-TP_PERCENT = 0.012           # Take Profit: 1.2%
-SL_PERCENT = 0.006           # Stop Loss: 0.6%
+BASE_POSITION_VOLUME = 20.0  
+TP_PERCENT = 0.012           
+SL_PERCENT = 0.006           
 
-# Рівні об'єму для тесту (Зараз 1.1 для тестів, змініть на 1.6 для стандартного режиму)
 VOLUME_THRESHOLD_MIN = 1.1   
 VOLUME_THRESHOLD_MAX = 1.4
 
@@ -84,7 +82,7 @@ def get_crypto_close_and_volume(symbol, timeframe):
         closes = [b[4] for b in bars]
         volumes = [b[5] for b in bars]
         return closes, volumes
-    except Exception as e:
+    except:
         return None, None
 
 def check_global_trend(symbol):
@@ -109,14 +107,41 @@ def has_active_position(symbol):
     except:
         return False
 
-def set_tp_sl_protection(symbol, side, filled_price, amount):
-    """Виставляє захисні тригерні TP та SL ордери після активації пастки"""
+# --- 🔥 НОВА ФУНКЦІЯ СИНХРОНІЗАЦІЇ ПРИ ПЕРЕЗАПУСКУ ---
+def sync_existing_traps_on_startup():
+    """Знаходить на біржі вже відкриті лімітки і бере їх на контроль"""
+    global active_traps
+    print("🔄 Сканування біржі на наявність раніше відкритих ліміток...")
     try:
-        if side == 'buy':  # Захищаємо LONG позицію
+        for symbol in SYMBOLS:
+            open_orders = exchange.fetch_open_orders(symbol)
+            for order in open_orders:
+                # Нам потрібні тільки звичайні лімітки (не стоп-ордери захисту)
+                if order['type'] == 'limit':
+                    # Оскільки ми не знаємо точний індекс свічки створення, ставимо поточний
+                    # Це захистить ордер від негайного видалення, давши йому ще 30 хв життя
+                    closes, _ = get_crypto_close_and_volume(symbol, TIMEFRAME_TRADE)
+                    current_idx = len(closes) if closes else 100
+
+                    active_traps[symbol] = {
+                        'order_id': order['id'],
+                        'placed_at_candle_idx': current_idx,
+                        'side': order['side'],
+                        'target_price': float(order['price']),
+                        'amount': float(order['amount'])
+                    }
+                    print(f"🔗 Знайдено та взято під контроль ордер {order['side'].upper()} по {symbol} (ID: {order['id']})")
+        print(f"✅ Синхронізація завершена. Взято під контроль пасток: {len(active_traps)}")
+    except Exception as e:
+        print(f"⚠️ Не вдалося синхронізувати старі ордери: {e}")
+
+def set_tp_sl_protection(symbol, side, filled_price, amount):
+    try:
+        if side == 'buy':  
             tp_price = filled_price * (1 + TP_PERCENT)
             sl_price = filled_price * (1 - SL_PERCENT)
             close_side = 'sell'
-        else:  # Захищаємо SHORT позицію
+        else:  
             tp_price = filled_price * (1 - TP_PERCENT)
             sl_price = filled_price * (1 + SL_PERCENT)
             close_side = 'buy'
@@ -127,12 +152,10 @@ def set_tp_sl_protection(symbol, side, filled_price, amount):
 
         print(f"🛡️ [ЗАХИСТ ВХОДУ] Виставляємо TP/SL для {symbol} ({side.upper()}) по ціні входу {filled_price}...")
 
-        # 1. Take Profit
         tp_params = {'triggerPrice': tp_price_formatted, 'reduceOnly': True}
         tp_order = exchange.create_order(symbol, 'stop', close_side, amount_formatted, params=tp_params)
         print(f"   🎯 Take Profit виставлено на рівень: {tp_price_formatted} (ID: {tp_order['id']})")
 
-        # 2. Stop Loss
         sl_params = {'triggerPrice': sl_price_formatted, 'reduceOnly': True}
         sl_order = exchange.create_order(symbol, 'stop', close_side, amount_formatted, params=sl_params)
         print(f"   🛑 Stop Loss виставлено на рівень: {sl_price_formatted} (ID: {sl_order['id']})")
@@ -152,7 +175,6 @@ def handle_traps_timeout(current_candle_idx, symbol):
             amount = float(order.get('amount', trap['amount']))
             side = trap['side']
             
-            # Викликаємо захист
             set_tp_sl_protection(symbol, side, filled_price, amount)
             del active_traps[symbol]
             return
@@ -161,7 +183,6 @@ def handle_traps_timeout(current_candle_idx, symbol):
             del active_traps[symbol]
             return
 
-        # Скасування лімітки через 30 хвилин (2 свічки по 15м)
         if current_candle_idx - trap['placed_at_candle_idx'] >= 2:
             print(f"⏰ [ТАЙМАУТ ПАСТКИ] Минуло 30 хв. Видаляємо лімітку по {symbol}")
             exchange.cancel_order(trap['order_id'], symbol)
@@ -193,7 +214,10 @@ def manage_open_positions():
 # --- ГОЛОВНИЙ ЦИКЛ БОТА ---
 def main_cycle():
     global last_heartbeat_hour
-    print(f"🤖 Бот Lyra V2 з лімітними пастками активований (Тест-Режим об'єму: {VOLUME_THRESHOLD_MIN}).")
+    print(f"🤖 Бот Lyra V2 з авто-синхронізацією ліміток запущений.")
+    
+    # Запускаємо синхронізацію ОДИН РАЗ при старті
+    sync_existing_traps_on_startup()
 
     while True:
         try:
@@ -206,17 +230,15 @@ def main_cycle():
                 try:
                     exchange.options['accountsByType'] = {'swap': 'collateral'}
                     balance = exchange.fetch_balance()
-                    usdt_data = balance.get('USDT', {})
-                    if isinstance(usdt_data, dict):
-                        usdt_free = float(usdt_data.get('free', 0.0) or 0.0)
-                        usdt_used = float(usdt_data.get('used', 0.0) or 0.0)
-                        usdt_total = float(usdt_data.get('total', 0.0) or 0.0)
-                    else:
-                        usdt_free = usdt_used = usdt_total = 0.0
+                    
+                    # ПОВНІСТЮ ВИПРАВЛЕНИЙ ПАРСИНГ Ф'ЮЧЕРСНОГО БАЛАНСУ WHITEBIT
+                    usdt_total = float(balance.get('total', {}).get('USDT', 0.0) or 0.0)
+                    usdt_free = float(balance.get('free', {}).get('USDT', 0.0) or 0.0)
+                    usdt_used = float(balance.get('used', {}).get('USDT', 0.0) or 0.0)
 
                     print(f"💰 БАЛАНС USDT (Collateral) -> Всього: {usdt_total:.2f} | Вільно: {usdt_free:.2f} | В ордерах: {usdt_used:.2f}")
                 except Exception as b_err:
-                    print(f"💰 БАЛАНС USDT -> Не вдалося розпарсити об'єкт балансу: {b_err}")
+                    print(f"💰 БАЛАНС USDT -> Не вдалося порахувати баланс: {b_err}")
 
                 print("\n📊 СТАН РИНКУ ТА ІНДИКАТОРІВ:")
                 for symbol in SYMBOLS:
@@ -240,7 +262,7 @@ def main_cycle():
                 else:
                     print("   • Жодних виставлених ліміток зараз немає.")
 
-                print(f"\n💚 Статус: Скрипт працює. Захисні блоки TP/SL активні.")
+                print(f"\n💚 Статус: Скрипт захищений від перезапусків.")
                 print("==================================================================\n")
                 last_heartbeat_hour = current_time.hour
 
@@ -292,7 +314,7 @@ def main_cycle():
                                 'amount': amount
                             }
                         except ccxt.InsufficientFunds:
-                            print(f"⚠️ Не вдалося виставити LONG ордер по {symbol}: мало балансу.")
+                            print(f"⚠️ Мало маржинального балансу для LONG по {symbol}.")
                         except Exception as order_err:
                             print(f"❌ Помилка створення LONG по {symbol}: {order_err}")
 
@@ -322,7 +344,7 @@ def main_cycle():
                                 'amount': amount
                             }
                         except ccxt.InsufficientFunds:
-                            print(f"⚠️ Не вдалося виставити SHORT ордер по {symbol}: мало балансу.")
+                            print(f"⚠️ Мало маржинального балансу для SHORT по {symbol}.")
                         except Exception as order_err:
                             print(f"❌ Помилка створення SHORT по {symbol}: {order_err}")
 
