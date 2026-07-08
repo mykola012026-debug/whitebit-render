@@ -4,8 +4,8 @@ import ccxt
 # ==========================================
 # ⚙️ НАЛАШТУВАННЯ ТОРГОВОГО БОТА
 # ==========================================
-API_KEY = "ВАШ_API_KEY"
-API_SECRET = "ВАШ_API_SECRET"
+API_KEY = "69be7ce4-811d-4402-a720-3055ba257bc5"
+API_SECRET = "M7CqL2K3X0gV79R1pW4uNjD5sY8zA2e6tB9"
 
 # Список монет для торгівлі (Ф'ючерси WhiteBIT)
 SYMBOLS = [
