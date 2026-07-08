@@ -13,12 +13,12 @@ TIMEFRAME_TREND = '1h'
 BASE_POSITION_VOLUME = 5.5  # Об'єм входу в USDT
 LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
-TP_PERCENT = 0.025          # +2.5% (при 10х = +25% до маржі)
-SL_PERCENT = 0.012          # -1.2% (при 10х = -12% до маржі)
+TP_PERCENT = 0.016          # +2.5% (при 10х = +25% до маржі)
+SL_PERCENT = 0.009          # -1.2% (при 10х = -12% до маржі)
 TIMEOUT_SECONDS = 3600      # 1 година у секундах для таймауту ліміток
 
 # Коефіцієнт активації безубитку (0.4 = 40% від цілі Take Profit)
-BREAKEVEN_TRIGGER_PCT = 0.4  
+BREAKEVEN_TRIGGER_PCT = 0.7  
 
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
