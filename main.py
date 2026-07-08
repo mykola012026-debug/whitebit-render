@@ -57,17 +57,17 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_dynamic_threshold(volumes):
-    if len(volumes) < 20: return 1.6
+    if len(volumes) < 20: return 1.1
     last_20 = volumes[-20:]
     mean_vol = sum(last_20) / 20
-    if mean_vol == 0: return 1.6
+    if mean_vol == 0: return 1.1
 
     variance = sum((x - mean_vol) ** 2 for x in last_20) / 20
     std_vol = variance ** 0.5
 
     cv = std_vol / mean_vol
-    threshold = 1.6 + (cv * 0.5)
-    return min(max(threshold, 1.6), 2.5)
+    threshold = 1.1 + (cv * 0.5)
+    return min(max(threshold, 1.1), 1.5)
 
 # --- ЛОГІКА ДАНИХ ТА МОНІТОРИНГУ ---
 def get_crypto_close_and_volume(symbol, timeframe):
