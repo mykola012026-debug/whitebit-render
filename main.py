@@ -13,11 +13,11 @@ TIMEFRAME_TREND = '1h'
 BASE_POSITION_VOLUME = 10  # Об'єм входу в USDT
 LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
-TP_PERCENT = 0.016          # +2.5% (при 10х = +25% до маржі)
-SL_PERCENT = 0.009          # -1.2% (при 10х = -12% до маржі)
+TP_PERCENT = 0.016          # +1.6% (при 10х = +16% до маржі)
+SL_PERCENT = 0.009          # -0.9% (при 10х = -9% до маржі)
 TIMEOUT_SECONDS = 3600      # 1 година у секундах для таймауту ліміток
 
-# Коефіцієнт активації безубитку (0.4 = 40% від цілі Take Profit)
+# Коефіцієнт активації безубитку (0.44 = ~44% від цілі Take Profit, тобто ~0.7% руху ціни)
 BREAKEVEN_TRIGGER_PCT = 0.44  
 
 exchange = ccxt.whitebit({
@@ -108,7 +108,7 @@ def control_and_protect_positions(real_positions):
             is_long = p_size > 0
             entry_price = safe_float(pos.get('entryPrice') or pos.get('info', {}).get('entryPrice'))
             unrealized_pnl = safe_float(pos.get('unrealizedPnl') or pos.get('info', {}).get('pnl'))
-            
+
             open_orders = exchange.fetch_open_orders(symbol)
             has_sl = False
             has_tp = False
@@ -148,11 +148,11 @@ def control_and_protect_positions(real_positions):
 
                 if not has_sl:
                     exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_sl})
-                    print(f"   🛑 Первинний Stop Loss (-1.2%) виставлено: {precise_sl}")
+                    print(f"   🛑 Первинний Stop Loss (-{SL_PERCENT*100}%) виставлено: {precise_sl}")
                 if not has_tp:
                     exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_tp})
-                    print(f"   🟢 Первинний Take Profit (+2.5%) виставлено: {precise_tp}")
-                
+                    print(f"   🟢 Первинний Take Profit (+{TP_PERCENT*100}%) виставлено: {precise_tp}")
+
                 if symbol in active_traps: del active_traps[symbol]
                 continue
 
@@ -161,9 +161,9 @@ def control_and_protect_positions(real_positions):
             if unrealized_pnl >= target_pnl_to_activate:
                 if has_breakeven_sl:
                     continue  # Вже захищено в 0
-                
+
                 print(f"🚀 [БЕЗЗБИТОК] Позиція {symbol} дала гарний профіт ({unrealized_pnl:.2f} USDT). Переносимо SL у нуль...")
-                
+
                 if old_sl_id:
                     try:
                         exchange.cancel_order(old_sl_id, symbol)
