@@ -87,15 +87,25 @@ def get_position_protection_levels(symbol):
     return tp, sl
 
 def clean_orphan_orders(symbol):
+    """🔥 МОДЕРНІЗОВАНИЙ ДВІРНИК: чистить лімітки без сигналу, а також закриває стопи-сироти, якщо позиції немає"""
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
         if open_orders:
             for order in open_orders:
+                # 1. Якщо це звичайна лімітка входу (немає stopPrice) і вона не в активних пастках
                 if not order.get('stopPrice'):
                     print(f"🧹 [ДВІРНИК] Очищення лімітки по {symbol}...")
                     exchange.cancel_order(order['id'], symbol)
                     print(f"   ✅ Ордер ID {order['id']} скасовано.")
+                
+                # 2. Якщо це стоп-ордер (є stopPrice), але позиції по монеті вже НЕМАЄ (наслідок ручного закриття або збою)
+                elif order.get('stopPrice'):
+                    real_positions = get_active_positions()
+                    if symbol not in real_positions:
+                        print(f"🧹 [ДВІРНИК] Знайдено залишений стоп-ордер (ID: {order['id']}) по {symbol} без активної позиції! Видаляємо...")
+                        exchange.cancel_order(order['id'], symbol)
+                        print(f"   ✅ Стоп-хвіст успішно зачищено.")
     except Exception:
         pass
 
@@ -298,8 +308,8 @@ def main_cycle():
 
             # --- АНАЛІЗ ТА ТОРГІВЛЯ ---
             for symbol in SYMBOLS:
-                if symbol not in real_positions and symbol not in active_traps:
-                    clean_orphan_orders(symbol)
+                # 🔥 ТЕПЕР ТУТ ДВІРНИК ТАКОЖ ЗНОСИТЬ СТОПИ-СИРОТИ ДЛЯ ВІЛЬНИХ МОНЕТ
+                clean_orphan_orders(symbol)
 
                 if symbol in real_positions: 
                     continue  
