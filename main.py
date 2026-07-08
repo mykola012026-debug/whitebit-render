@@ -1,451 +1,389 @@
 import time
+from datetime import datetime
 import ccxt
 
-# ==========================================
-# ⚙️ НАЛАШТУВАННЯ ТОРГОВОГО БОТА
-# ==========================================
-API_KEY = "69be7ce4-811d-4402-a720-3055ba257bc5"
-API_SECRET = "M7CqL2K3X0gV79R1pW4uNjD5sY8zA2e6tB9"
+# --- НАЛАШТУВАННЯ ТА ІНІЦІАЛІЗАЦІЯ ---
+# Автоматичний клінінг ключів від випадкових невидимих символів (.strip())
+API_KEY = '9dfcbc7d6c30802daf10d0bb50bf50d1'.strip()
+API_SECRET = '4ff8480b5bb8914e4dacf7ac40401762'.strip()
 
-# Список монет для торгівлі (Ф'ючерси WhiteBIT)
-SYMBOLS = [
-    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'ONDO/USDT:USDT', 
-    'LINK/USDT:USDT', 'NEAR/USDT:USDT', 'RENDER/USDT:USDT', 
-    'FET/USDT:USDT', 'SOL/USDT:USDT', 'SUI/USDT:USDT'
-]
-
-# Параметри стратегії
-TIMEFRAME_1H = '1h'
-TIMEFRAME_15M = '15m'
-
-VOLUME_THRESHOLD_MIN = 1.1
-VOLUME_THRESHOLD_MAX = 1.4
-RSI_SHORT_LEVEL = 45
-RSI_LONG_LEVEL = 55
-
-# Управління ризиками
-RISK_PER_TRADE_USDT = 10.0  # Сума на одну угоду
-TAKE_PROFIT_PCT = 0.012     # +1.2%
-STOP_LOSS_PCT = 0.006       # -0.6%
-
-# Глобальне сховище пасток (Ордери на вхід під контролем бота)
-# Структура: { order_id: { "symbol": ..., "placed_at_candle_idx": ..., "target_price": ..., "amount": ..., "side": ... } }
-active_traps = {}
-
-# Ініціалізація підключення до WhiteBIT
 exchange = ccxt.whitebit({
     'apiKey': API_KEY,
     'secret': API_SECRET,
     'enableRateLimit': True,
+    'options': {'defaultType': 'swap'}  # Працюємо з безстроковими ф'ючерсами
 })
 
-# ==========================================
-# 🛠️ ДОПОМІЖНІ ФУНКЦІЇ ТА ТЕХНІЧНІ ІНДИКАТОРИ
-# ==========================================
+print("⏳ Завантаження ринків WhiteBIT...")
+exchange.load_markets()
+print("✅ Ринки успішно завантажені.")
 
-def calculate_ema(prices, period=12):
-    """ Розрахунок Exponential Moving Average (EMA) """
-    if len(prices) < period:
-        return None
+SYMBOLS = [
+    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'ONDO/USDT:USDT', 'LINK/USDT:USDT', 
+    'NEAR/USDT:USDT', 'RENDER/USDT:USDT', 'FET/USDT:USDT', 'SOL/USDT:USDT', 'SUI/USDT:USDT'
+]
+TIMEFRAME_TRADE = '15m'
+TIMEFRAME_TREND = '1h'
+
+BASE_POSITION_VOLUME = 6.0  # Об'єм ордера в USDT
+TP_PERCENT = 0.012          # +1.2%
+SL_PERCENT = 0.006          # -0.6%
+
+VOLUME_THRESHOLD_MIN = 1.1   
+VOLUME_THRESHOLD_MAX = 1.4
+
+active_traps = {}
+last_heartbeat_hour = -1
+
+# --- МАТЕМАТИЧНІ ФУНКЦІЇ НА ЧИСТОМУ PYTHON ---
+def calculate_ema(prices, period):
+    if len(prices) < period: return 0
     k = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
         ema = price * k + ema * (1 - k)
     return ema
 
 def calculate_rsi(prices, period=14):
-    """ Розрахунок Relative Strength Index (RSI) """
-    if len(prices) < period + 1:
-        return None
+    if len(prices) < period + 1: return 50
     gains = []
     losses = []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i-1]
         gains.append(max(diff, 0))
         losses.append(max(-diff, 0))
-    
+
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    
-    if avg_loss == 0:
-        return 100
-        
-    for i in range(period, len(prices) - 1):
+
+    if avg_loss == 0: return 100
+
+    for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        
+
+    if avg_loss == 0: return 100
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_current_candle_index(symbol, timeframe='15m'):
-    """ Отримання унікального індексу (timestamp) поточної свічки """
+def calculate_dynamic_threshold(volumes):
+    if len(volumes) < 20: return VOLUME_THRESHOLD_MIN
+    last_20 = volumes[-20:]
+    mean_vol = sum(last_20) / 20
+    if mean_vol == 0: return VOLUME_THRESHOLD_MIN
+
+    variance = sum((x - mean_vol) ** 2 for x in last_20) / 20
+    std_vol = variance ** 0.5
+
+    cv = std_vol / mean_vol
+    threshold = VOLUME_THRESHOLD_MIN + (cv * 0.2)
+    return min(max(threshold, VOLUME_THRESHOLD_MIN), VOLUME_THRESHOLD_MAX)
+
+# --- ЛОГІКА ДАНИХ ТА МОНІТОРИНГУ ---
+def get_crypto_close_and_volume(symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=1)
-        if ohlcv:
-            return ohlcv[0][0]
+        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+        closes = [b[4] for b in bars]
+        volumes = [b[5] for b in bars]
+        return closes, volumes
     except:
-        pass
-    return int(time.time() * 1000)
+        return None, None
 
-def has_trap_for_symbol(symbol):
-    """ Перевірка, чи вже виставлена пастка по конкретному інструменту """
-    for trap in active_traps.values():
-        if trap['symbol'] == symbol:
-            return True
-    return False
+def check_global_trend(symbol):
+    closes, _ = get_crypto_close_and_volume(symbol, TIMEFRAME_TREND)
+    if not closes: return "FLAT", 0, 0
+    ema_50 = calculate_ema(closes, 50)
+    last_price = closes[-1]
 
-# ==========================================
-# 🔄 МОДУЛЬ СИНХРОНІЗАЦІЇ ТА ЗАХИСТУ ВІД ПЕРЕЗАПУСКІВ
-# ==========================================
+    if last_price > ema_50: return "LONG_ONLY", last_price, ema_50
+    if last_price < ema_50: return "SHORT_ONLY", last_price, ema_50
+    return "FLAT", last_price, ema_50
 
-def sync_active_traps_with_exchange():
-    """ Сканує відкриті ордери на біржі та відновлює active_traps в пам'яті """
+def has_active_position(symbol):
+    try:
+        exchange.options['accountsByType'] = {'swap': 'collateral'}
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            p_size = float(pos.get('contracts') or pos.get('info', {}).get('amount', 0) or 0)
+            if pos['symbol'] == symbol and abs(p_size) > 0.000001: 
+                return True
+        return False
+    except:
+        return False
+
+# --- СИНХРОНІЗАЦІЯ ПРИ ПЕРЕЗАПУСКУ ---
+def sync_existing_traps_on_startup():
+    """ Знаходить на біржі вже відкриті лімітки і бере їх під контроль бота """
     global active_traps
-    print("🔄 Сканування відкритих ордерів на WhiteBIT для синхронізації пам'яті...")
+    print("🔄 Сканування біржі на наявність раніше відкритих ліміток...")
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
-        open_orders = exchange.fetch_open_orders()
-        
-        current_idx = get_current_candle_index(SYMBOLS[0], TIMEFRAME_15M)
-        synced_count = 0
-        
-        for order in open_orders:
-            symbol = order.get('symbol')
-            # Перевіряємо, чи цей ордер належить до нашого списку ф'ючерсів та чи є він лімітним
-            if symbol in SYMBOLS and order.get('type') == 'limit':
-                order_id = str(order['id'])
-                
-                # Пропускаємо стоп-ордери (TP/SL), у WhiteBIT вони зазвичай мають інші параметри або маркування
-                if order.get('info', {}).get('type') in ['stopMarket', 'stopLimit'] or 'activationPrice' in order.get('info', {}):
-                    continue
-                    
-                if order_id not in active_traps:
-                    active_traps[order_id] = {
-                        'symbol': symbol,
-                        'placed_at_candle_idx': current_idx, # Даємо ордеру нові 30 хвилин життя з моменту перезапуску
-                        'target_price': float(order['price']),
-                        'amount': float(order['amount']),
-                        'side': order['side'].lower()
-                    }
-                    synced_count += 1
-                    
-        print(f"✅ Синхронізація завершена. Взято під контроль пасток: {synced_count}\n")
+        for symbol in SYMBOLS:
+            try:
+                open_orders = exchange.fetch_open_orders(symbol)
+                for order in open_orders:
+                    # Беремо лише звичайні лімітки входу, ігноруючи умовні стоп-ордери
+                    if order.get('type') == 'limit' and 'stopPrice' not in order and 'triggerPrice' not in order:
+                        closes, _ = get_crypto_close_and_volume(symbol, TIMEFRAME_TRADE)
+                        current_idx = len(closes) if closes else 100
+
+                        active_traps[symbol] = {
+                            'order_id': str(order['id']),
+                            'placed_at_candle_idx': current_idx,
+                            'side': order['side'].lower(),
+                            'target_price': float(order['price']),
+                            'amount': float(order['amount'])
+                        }
+                        print(f"🔗 Знайдено та взято під контроль ордер {order['side'].upper()} по {symbol} (ID: {order['id']})")
+            except Exception as sym_err:
+                print(f"⚠️ Не вдалося зчитати ордери для {symbol}: {sym_err}")
+        print(f"✅ Синхронізація завершена. Взято під контроль пасток: {len(active_traps)}")
     except Exception as e:
-        print(f"⚠️ Помилка синхронізації пасток: {e}\n")
+        print(f"⚠️ Загальна помилка синхронізації старих ордерів: {e}")
 
-# ==========================================
-# 🛡️ АВТОМАТИЧНЕ ВИСТАВЛЕННЯ СТОП-ОРДЕРІВ (TP/SL)
-# ==========================================
-
-def set_tp_sl_protection(symbol, side, entry_price, amount):
-    """ Виставляє пов'язані ордери Take Profit та Stop Loss """
+# --- АВТОМАТИЧНИЙ ЗАХИСТ ПОЗИЦІЇ (TP/SL) ---
+def set_tp_sl_protection(symbol, side, filled_price, amount):
+    """ Виставляє захисні стоп-ринкові ордери для обмеження ризиків """
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         
-        if side == 'buy':  # Захист для LONG позиції
-            tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-            sl_price = entry_price * (1 - STOP_LOSS_PCT)
+        if side == 'buy':  # Захист лонгу
+            tp_price = filled_price * (1 + TP_PERCENT)
+            sl_price = filled_price * (1 - SL_PERCENT)
             close_side = 'sell'
-        else:  # Захист для SHORT позиції
-            tp_price = entry_price * (1 - TAKE_PROFIT_PCT)
-            sl_price = entry_price * (1 + STOP_LOSS_PCT)
+        else:  # Захист шорту
+            tp_price = filled_price * (1 - TP_PERCENT)
+            sl_price = filled_price * (1 + SL_PERCENT)
             close_side = 'buy'
 
-        # Округлення цін відповідно до вимог біржі
-        market_info = exchange.market(symbol)
-        tp_price = float(exchange.price_to_precision(symbol, tp_price))
-        sl_price = float(exchange.price_to_precision(symbol, sl_price))
-        amount = float(exchange.amount_to_precision(symbol, amount))
+        # Округлення відповідно до специфікацій торгових пар WhiteBIT
+        tp_price_formatted = float(exchange.price_to_precision(symbol, tp_price))
+        sl_price_formatted = float(exchange.price_to_precision(symbol, sl_price))
+        amount_formatted = float(exchange.amount_to_precision(symbol, amount))
 
-        print(f"📡 Відправка захисних ордерів на WhiteBIT... (TP: {tp_price} | SL: {sl_price})")
+        print(f"🛡️ [ЗАХИСТ ВХОДУ] Виставляємо TP/SL для {symbol} ({side.upper()}) за ціною: {filled_price}")
 
-        # 1. Виставлення Take Profit (Трейд-ордер типу stopMarket)
-        tp_params = {
-            'stopPrice': tp_price, 
-            'activationPrice': tp_price,
-            'reduceOnly': True
-        }
-        exchange.create_order(symbol, 'stopMarket', close_side, amount, params=tp_params)
-        print(f"✅ [Захист] Take Profit активовано.")
+        # На ф'ючерсах WhiteBIT найнадійніше використовувати тип 'stopMarket' або 'market' із параметрами активації
+        tp_params = {'triggerPrice': tp_price_formatted, 'activationPrice': tp_price_formatted, 'reduceOnly': True}
+        tp_order = exchange.create_order(symbol, 'stopMarket', close_side, amount_formatted, params=tp_params)
+        print(f"   🎯 Take Profit виставлено на рівень: {tp_price_formatted} (ID: {tp_order['id']})")
 
-        # 2. Виставлення Stop Loss (Трейд-ордер типу stopMarket)
-        sl_params = {
-            'stopPrice': sl_price, 
-            'activationPrice': sl_price,
-            'reduceOnly': True
-        }
-        exchange.create_order(symbol, 'stopMarket', close_side, amount, params=sl_params)
-        print(f"✅ [Захист] Stop Loss активовано. Позиція повністю захищена!")
+        sl_params = {'triggerPrice': sl_price_formatted, 'activationPrice': sl_price_formatted, 'reduceOnly': True}
+        sl_order = exchange.create_order(symbol, 'stopMarket', close_side, amount_formatted, params=sl_params)
+        print(f"   🛑 Stop Loss виставлено на рівень: {sl_price_formatted} (ID: {sl_order['id']})")
 
     except Exception as e:
         print(f"❌ Помилка під час спроби встановити захист TP/SL для {symbol}: {e}")
 
-# ==========================================
-# 🕵️ МОДУЛЬ СТРАТЕГІЇ ТА ПОШУКУ СИГНАЛІВ
-# ==========================================
+# --- МОНІТОР СТАНУ ТА ТАЙМАУТІВ ---
+def handle_traps_timeout(current_candle_idx, symbol):
+    if symbol not in active_traps: return
+    trap = active_traps[symbol]
+    try:
+        exchange.options['accountsByType'] = {'swap': 'collateral'}
+        order = exchange.fetch_order(trap['order_id'], symbol)
 
-def scan_market_and_place_traps():
-    """ Сканує ринок та розставляє лімітки (пастки) на EMA-12 """
-    global active_traps
-    
-    for symbol in SYMBOLS:
-        try:
-            # Захист: якщо по цій монеті вже висить лімітка в пам'яті, ігноруємо її
-            if has_trap_for_symbol(symbol):
-                continue
-                
-            exchange.options['accountsByType'] = {'swap': 'collateral'}
-            
-            # 1. Визначення Глобального Тренду (1 година)
-            ohlcv_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_1H, limit=50)
-            closes_1h = [c[4] for c in ohlcv_1h]
-            ema_1h = calculate_ema(closes_1h, 12)
-            current_price = closes_1h[-1]
-            
-            trend = "NEUTRAL"
-            if ema_1h:
-                trend = "LONG_ONLY" if current_price > ema_1h else "SHORT_ONLY"
-            
-            # 2. Перевірка локального імпульсу (15 хвилин)
-            ohlcv_15m = exchange.fetch_ohlcv(symbol, TIMEFRAME_15M, limit=50)
-            closes_15m = [c[4] for c in ohlcv_15m]
-            volumes_15m = [c[5] for c in ohlcv_15m]
-            
-            rsi_15m = calculate_rsi(closes_15m, 14)
-            ema_12_15m = calculate_ema(closes_15m, 12)
-            
-            # Розрахунок коефіцієнта об'єму (сплеску)
-            last_volume = volumes_15m[-1]
-            avg_volume = sum(volumes_15m[-11:-1]) / 10 if len(volumes_15m) >= 11 else last_volume
-            vol_ratio = last_volume / avg_volume if avg_volume > 0 else 1.0
-            
-            # 3. Перевірка умов для відкриття пастки
-            if trend == "SHORT_ONLY" and vol_ratio >= VOLUME_THRESHOLD_MIN and vol_ratio <= VOLUME_THRESHOLD_MAX:
-                if rsi_15m and rsi_15m <= RSI_SHORT_LEVEL and ema_12_15m:
-                    
-                    # Ставимо пастку SHORT на лінію EMA-12
-                    target_price = float(exchange.price_to_precision(symbol, ema_12_15m))
-                    if target_price > current_price:  # EMA має бути вище ціни для шорт-лімітки
-                        
-                        amount = RISK_PER_TRADE_USDT / target_price
-                        amount = float(exchange.amount_to_precision(symbol, amount))
-                        
-                        print(f"🕸️ [ПАСТКА SHORT] {symbol}. Коеф: {vol_ratio:.2f}. Лімітка на EMA-12: {target_price}")
-                        order = exchange.create_order(symbol, 'limit', 'sell', amount, target_price)
-                        order_id = str(order['id'])
-                        
-                        active_traps[order_id] = {
-                            'symbol': symbol,
-                            'placed_at_candle_idx': get_current_candle_index(symbol, TIMEFRAME_15M),
-                            'target_price': target_price,
-                            'amount': amount,
-                            'side': 'sell'
-                        }
-                        print(f"✅ Лімітний ордер виставлено! ID: {order_id}")
-                        
-            elif trend == "LONG_ONLY" and vol_ratio >= VOLUME_THRESHOLD_MIN and vol_ratio <= VOLUME_THRESHOLD_MAX:
-                if rsi_15m and rsi_15m >= RSI_LONG_LEVEL and ema_12_15m:
-                    
-                    # Ставимо пастку LONG на лінію EMA-12
-                    target_price = float(exchange.price_to_precision(symbol, ema_12_15m))
-                    if target_price < current_price:  # EMA має бути нижче ціни для лонг-лімітки
-                        
-                        amount = RISK_PER_TRADE_USDT / target_price
-                        amount = float(exchange.amount_to_precision(symbol, amount))
-                        
-                        print(f"🕸️ [ПАСТКА LONG] {symbol}. Коеф: {vol_ratio:.2f}. Лімітка на EMA-12: {target_price}")
-                        order = exchange.create_order(symbol, 'limit', 'buy', amount, target_price)
-                        order_id = str(order['id'])
-                        
-                        active_traps[order_id] = {
-                            'symbol': symbol,
-                            'placed_at_candle_idx': get_current_candle_index(symbol, TIMEFRAME_15M),
-                            'target_price': target_price,
-                            'amount': amount,
-                            'side': 'buy'
-                        }
-                        print(f"✅ Лімітний ордер виставлено! ID: {order_id}")
-                        
-        except Exception as e:
-            print(f"⚠️ Помилка аналізу ринку для {symbol}: {e}")
+        # 1. Якщо пастка налилася повністю
+        if order['status'] == 'closed':
+            print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Ордер повністю виконано по {symbol}!")
+            filled_price = float(order.get('average') or order.get('price') or trap['target_price'])
+            amount = float(order.get('amount', trap['amount']))
+            side = trap['side']
 
-# ==========================================
-# ⏱️ МОДУЛЬ ЖИТТЄВОГО ЦИКЛУ ПАСТОК ТА НАЛИВУ
-# ==========================================
+            set_tp_sl_protection(symbol, side, filled_price, amount)
+            del active_traps[symbol]
+            return
 
-def handle_traps_timeout_and_fills():
-    """ Слідкує за виконанням ордерів або видаляє їх після 2 свічок (30 хв) """
-    global active_traps
-    orders_to_clean = []
-    
-    for order_id, trap in list(active_traps.items()):
-        symbol = trap['symbol']
-        try:
-            exchange.options['accountsByType'] = {'swap': 'collateral'}
-            order = exchange.fetch_order(order_id, symbol)
-            
-            # Сценарій 1: Пастка спрацювала (Ордер виконано)
-            if order['status'] == 'closed':
-                print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Ордер повністю виконано по {symbol}!")
-                
-                # Захист від збоїв ціни API: якщо біржа повернула криве поле price, беремо нашу розрахункову ціну
-                filled_price = float(order.get('price') or 0)
-                if filled_price == 0 or filled_price > trap['target_price'] * 2 or filled_price < trap['target_price'] * 0.5:
-                    filled_price = trap['target_price']
-                    
-                amount = float(order.get('amount') or trap['amount'])
-                side = trap['side']
-                
-                # Викликаємо автоматичний захист TP/SL
-                set_tp_sl_protection(symbol, side, filled_price, amount)
-                orders_to_clean.append(order_id)
-                continue
-                
-            # Сценарій 2: Таймаут пастки (Пройшло 2 свічки по 15 хвилин)
-            current_candle_idx = get_current_candle_index(symbol, TIMEFRAME_15M)
-            if current_candle_idx - trap['placed_at_candle_idx'] >= 2 * 15 * 60 * 1000:
-                print(f"⏱️ [ТАЙМАУТ] Пастка по {symbol} застаріла (висіла 30 хв). Видаляємо ордер з біржі...")
-                exchange.cancel_order(order_id, symbol)
-                orders_to_clean.append(order_id)
-                
-        except Exception as e:
-            # Якщо ордер видалено на біржі вручну користувачем
-            if "Order not found" in str(e) or "ORDER_NOT_FOUND" in str(e):
-                orders_to_clean.append(order_id)
-            else:
-                print(f"⚠️ Помилка обробки статусу пастки {order_id}: {e}")
-                
-    # Очищення пам'яті
-    for order_id in orders_to_clean:
-        if order_id in active_traps:
-            del active_traps[order_id]
+        # 2. Якщо ордер був скасований вручну користувачем
+        elif order['status'] == 'canceled':
+            print(f"🗑️ Ордер по {symbol} було скасовано ззовні. Видаляємо з пам'яті бота.")
+            del active_traps[symbol]
+            return
 
-# ==========================================
-# 🚀 МОДУЛЬ «КАТАПУЛЬТА» (КЕРУВАННЯ ВІДКРИТИМИ УГОДАМИ)
-# ==========================================
+        # 3. Якщо пройшло більше 2 свічок (30 хвилин) без наливу
+        if current_candle_idx - trap['placed_at_candle_idx'] >= 2:
+            print(f"⏰ [ТАЙМАУТ ПАСТКИ] Минуло 30 хв. Видаляємо лімітку по {symbol} з біржі...")
+            try:
+                exchange.cancel_order(trap['order_id'], symbol)
+            except:
+                pass
+            del active_traps[symbol]
 
+    except Exception as e:
+        if "Order not found" in str(e) or "ORDER_NOT_FOUND" in str(e):
+            if symbol in active_traps: del active_traps[symbol]
+        else:
+            print(f"❌ Помилка перевірки стану пастки для {symbol}: {e}")
+
+# --- МОДУЛЬ КАТАПУЛЬТА ---
 def manage_open_positions():
-    """ Моніторить відкриті позиції та сигналізує про можливість переносу стопу """
     try:
         exchange.options['accountsByType'] = {'swap': 'collateral'}
         positions = exchange.fetch_positions(SYMBOLS)
-        
         for pos in positions:
             symbol = pos['symbol']
-            p_size = float(pos.get('contracts') or pos.get('info', {}).get('amount', 0) or 0)
+            if symbol not in SYMBOLS: continue
             
-            # Пропускаємо монети, де немає відкритих позицій
-            if symbol not in SYMBOLS or abs(p_size) == 0: 
-                continue
+            p_size = float(pos.get('contracts') or pos.get('info', {}).get('amount', 0) or 0)
+            if abs(p_size) == 0: continue
 
-            # Екстрений захист від NoneType з боку WhiteBIT під час оновлення даних
+            # Захист від критичної помилки NoneType (коли біржа оновлює дані і повертає пусті поля)
             if pos.get('entryPrice') is None or pos.get('markPrice') is None:
                 continue
 
             entry_price = float(pos['entryPrice'])
             current_price = float(pos['markPrice'])
-            
-            if entry_price == 0: 
-                continue
+            if entry_price == 0: continue
             
             side = 'long' if p_size > 0 else 'short'
-            
-            # Розрахунок чистого руху ціни у відсотках
-            if side == 'long':
-                p_diff = (current_price - entry_price) / entry_price
-            else:
-                p_diff = (entry_price - current_price) / entry_price
+            p_diff = (current_price - entry_price) / entry_price if side == 'long' else (entry_price - current_price) / entry_price
 
-            # Сигнал Катапульти, якщо пройшли більше ніж +0.4%
             if p_diff >= 0.004:
-                print(f"🚀 [КАТАПУЛЬТА] {symbol} пройшов {p_diff*100:.2f}%. Рекомендується перенести стоп у безубиток по ціні {entry_price}")
-                
+                print(f"🚀 [КАТАПУЛЬТА] {symbol} пройшов {p_diff*100:.2f}%. Рекомендується перенести стоп в БУ по {entry_price}")
     except Exception as e:
         print(f"❌ Помилка в модулі Катапульта: {e}")
 
-# ==========================================
-# 📊 МОДУЛЬ ЗВІТНОСТІ ТА МОНІТОРИНГУ
-# ==========================================
+# --- ГОЛОВНИЙ ЦИКЛ БОТА ---
+def main_cycle():
+    global last_heartbeat_hour
+    print(f"🤖 Бот Lyra V2 з авто-синхронізацією ліміток запущений.")
 
-def print_system_report():
-    """ Виводить у консоль поточний стан балансу, індикаторів та пасток """
-    try:
-        exchange.options['accountsByType'] = {'swap': 'collateral'}
-        balance = exchange.fetch_balance()
-        usdt_info = balance.get('USDT', {})
-        
-        total_bal = usdt_info.get('total', 0.0)
-        free_bal = usdt_info.get('free', 0.0)
-        used_bal = usdt_info.get('used', 0.0)
-        
-        print("\n⚡ ========== МАКСИМАЛЬНИЙ ЗВІТ СИСТЕМИ ==========")
-        print(f"💰 БАЛАНС USDT (Collateral) -> Всього: {total_bal:.2f} | Вільно: {free_bal:.2f} | В ордерах: {used_bal:.2f}\n")
-        print("📊 СТАН РИНКУ ТА ІНДИКАТОРІВ:")
-        
-        for symbol in SYMBOLS:
-            try:
-                ohlcv_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_1H, limit=20)
-                closes_1h = [c[4] for c in ohlcv_1h]
-                ema_1h = calculate_ema(closes_1h, 12)
-                current_price = closes_1h[-1]
-                trend = "LONG_ONLY" if ema_1h and current_price > ema_1h else "SHORT_ONLY"
-                
-                ohlcv_15m = exchange.fetch_ohlcv(symbol, TIMEFRAME_15M, limit=30)
-                closes_15m = [c[4] for c in ohlcv_15m]
-                volumes_15m = [c[5] for c in ohlcv_15m]
-                rsi_15m = calculate_rsi(closes_15m, 14)
-                
-                last_volume = volumes_15m[-1]
-                avg_volume = sum(volumes_15m[-11:-1]) / 10 if len(volumes_15m) >= 11 else last_volume
-                
-                status = "Вільна"
-                for trap in active_traps.values():
-                    if trap['symbol'] == symbol:
-                        status = f"Пастка активна ({trap['side'].upper()})"
-                        
-                rsi_str = f"{rsi_15m:.1f}" if rsi_15m else "N/A"
-                print(f"  • {symbol.ljust(16)} | Тренд 1h: {trend.ljust(10)} | Ціна: {current_price:<10} | RSI 15m: {rsi_str:<4} | Об'єм: {last_volume:.1f}/{avg_volume:.1f} | Стан: {status}")
-            except:
-                print(f"  • {symbol.ljust(16)} | Помилка збору даних індикаторів.")
-                
-        print("\n📦 АКТИВНІ ПАСТКИ В ПАМ'ЯТІ:")
-        if not active_traps:
-            print("    • Немає активних ліміток на біржі.")
-        else:
-            for o_id, trap in active_traps.items():
-                print(f"    • [{trap['symbol']}] Лімітний ордер {trap['side'].upper()} чекає на ціні {trap['target_price']}. ID: {o_id}")
-                
-        print("\n💚 Статус: Скрипт захищений від перезапусків.")
-        print("==================================================\n")
-    except Exception as e:
-        print(f"⚠️ Помилка генерації звіту системи: {e}")
+    # Первинне сканування активних пасток на випадок неочікуваного перезапуску
+    sync_existing_traps_on_startup()
 
-# ==========================================
-# 🏁 ГОЛОВНИЙ ЦИКЛ ЗАПУСКУ БОТА
-# ==========================================
+    while True:
+        try:
+            current_time = datetime.now()
+
+            # --- ЩОГОДИННИЙ СИСТЕМНИЙ ЗВІТ ---
+            if current_time.hour != last_heartbeat_hour:
+                print(f"\n⚡ [{current_time.strftime('%H:%M:%S')}] ========== МАКСИМАЛЬНИЙ ЗВІТ СИСТЕМИ ==========")
+
+                try:
+                    exchange.options['accountsByType'] = {'swap': 'collateral'}
+                    balance = exchange.fetch_balance()
+
+                    usdt_total = float(balance.get('total', {}).get('USDT', 0.0) or 0.0)
+                    usdt_free = float(balance.get('free', {}).get('USDT', 0.0) or 0.0)
+                    usdt_used = float(balance.get('used', {}).get('USDT', 0.0) or 0.0)
+
+                    print(f"💰 БАЛАНС USDT (Collateral) -> Всього: {usdt_total:.2f} | Вільно: {usdt_free:.2f} | В ордерах: {usdt_used:.2f}")
+                except Exception as b_err:
+                    print(f"💰 БАЛАНС USDT -> Не вдалося порахувати баланс: {b_err}")
+
+                print("\n📊 СТАН РИНКУ ТА ІНДИКАТОРІВ:")
+                for symbol in SYMBOLS:
+                    trend, last_p, ema_50_1h = check_global_trend(symbol)
+                    closes_15m, volumes_15m = get_crypto_close_and_volume(symbol, TIMEFRAME_TRADE)
+
+                    if closes_15m and volumes_15m:
+                        rsi_15m = calculate_rsi(closes_15m, 14)
+                        last_vol = volumes_15m[-1]
+                        avg_vol = sum(volumes_15m[-20:]) / 20
+                        coef = calculate_dynamic_threshold(volumes_15m)
+                        vol_status = f"{last_vol:.1f}/{avg_vol*coef:.1f}"
+
+                        pos_status = "Є ПОЗИЦІЯ" if has_active_position(symbol) else "Вільна"
+                        print(f"  • {symbol:<16} | Тренд 1h: {trend:<10} | Ціна: {last_p:<8.4f} | RSI 15m: {rsi_15m:.1f} | Об'єм: {vol_status} | Стан: {pos_status}")
+
+                print("\n📦 АКТИВНІ ПАСТКИ В ПАМ'ЯТІ:")
+                if active_traps:
+                    for s, t in active_traps.items():
+                        print(f"   • [{s}] Лімітний ордер {t['side'].upper()} чекає на ціні {t['target_price']}. ID: {t['order_id']}")
+                else:
+                    print("   • Жодних виставлених ліміток зараз немає.")
+
+                print(f"\n💚 Статус: Скрипт повністю захищений від перезапусків.")
+                print("==================================================================\n")
+                last_heartbeat_hour = current_time.hour
+
+            # --- УПРАВЛІННЯ ВІДКРИТИМИ УГОДАМИ ---
+            manage_open_positions()
+
+            # --- АНАЛІЗ ТА ТОРГІВЛЯ ---
+            for symbol in SYMBOLS:
+                if has_active_position(symbol): continue
+
+                closes, volumes = get_crypto_close_and_volume(symbol, TIMEFRAME_TRADE)
+                if not closes or not volumes: continue
+
+                current_candle_idx = len(closes)
+                handle_traps_timeout(current_candle_idx, symbol)
+                if symbol in active_traps: continue
+
+                ema_12 = calculate_ema(closes, 12)
+                rsi = calculate_rsi(closes, 14)
+
+                avg_vol_20 = sum(volumes[-20:]) / 20
+                dynamic_coef = calculate_dynamic_threshold(volumes)
+
+                # Умова імпульсу по об'єму
+                if volumes[-1] > (avg_vol_20 * dynamic_coef):
+                    global_trend, _, _ = check_global_trend(symbol)
+
+                    # --- LONG ПАСТКА ---
+                    if global_trend == "LONG_ONLY" and rsi < 65 and closes[-1] > ema_12:
+                        print(f"🕸️ [ПАСТКА LONG] {symbol}. Коеф: {dynamic_coef:.2f}. Лімітка на EMA-12: {ema_12}")
+
+                        raw_amount = BASE_POSITION_VOLUME / ema_12
+                        market_info = exchange.market(symbol)
+                        min_qty = float(market_info['limits']['amount']['min'] or 0.001)
+                        if raw_amount < min_qty: raw_amount = min_qty
+
+                        amount = float(exchange.amount_to_precision(symbol, raw_amount))
+                        price = float(exchange.price_to_precision(symbol, ema_12))
+
+                        try:
+                            exchange.options['accountsByType'] = {'swap': 'collateral'}
+                            order = exchange.create_order(symbol, 'limit', 'buy', amount, price)
+                            print(f"✅ Лімітний ордер LONG виставлено! ID: {order['id']}")
+
+                            active_traps[symbol] = {
+                                'order_id': str(order['id']), 
+                                'placed_at_candle_idx': current_candle_idx,
+                                'side': 'buy',
+                                'target_price': price,
+                                'amount': amount
+                            }
+                        except ccxt.InsufficientFunds:
+                            print(f"⚠️ Мало маржинального балансу для LONG по {symbol}.")
+                        except Exception as order_err:
+                            print(f"❌ Помилка створення LONG по {symbol}: {order_err}")
+
+                    # --- SHORT ПАСТКА ---
+                    elif global_trend == "SHORT_ONLY" and rsi > 35 and closes[-1] < ema_12:
+                        print(f"🕸️ [ПАСТКА SHORT] {symbol}. Коеф: {dynamic_coef:.2f}. Лімітка на EMA-12: {ema_12}")
+
+                        raw_amount = BASE_POSITION_VOLUME / ema_12
+                        market_info = exchange.market(symbol)
+                        min_qty = float(market_info['limits']['amount']['min'] or 0.001)
+                        if raw_amount < min_qty: raw_amount = min_qty
+
+                        amount = float(exchange.amount_to_precision(symbol, raw_amount))
+                        price = float(exchange.price_to_precision(symbol, ema_12))
+
+                        try:
+                            exchange.options['accountsByType'] = {'swap': 'collateral'}
+                            order = exchange.create_order(symbol, 'limit', 'sell', amount, price)
+                            print(f"✅ Лімітний ордер SHORT виставлено! ID: {order['id']}")
+
+                            active_traps[symbol] = {
+                                'order_id': str(order['id']), 
+                                'placed_at_candle_idx': current_candle_idx,
+                                'side': 'sell',
+                                'target_price': price,
+                                'amount': amount
+                            }
+                        except ccxt.InsufficientFunds:
+                            print(f"⚠️ Мало маржинального балансу для SHORT по {symbol}.")
+                        except Exception as order_err:
+                            print(f"❌ Помилка створення SHORT по {symbol}: {order_err}")
+
+            time.sleep(30)  # Періодичність ітерацій головного циклу
+
+        except Exception as e:
+            print(f"🚨 Критична помилка в циклі: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    print("🚀 Запуск торгового бота на WhiteBIT Futures...")
-    
-    # Крок 1. Первинна синхронізація з біржею (захист від втрати даних при перезапуску)
-    sync_active_traps_with_exchange()
-    
-    report_timer = 0
-    
-    while True:
-        # Крок 2. Скануємо ринок та розставляємо нові пастки
-        scan_market_and_place_traps()
-        
-        # Крок 3. Перевіряємо таймаути старих пасток та факт виконання налитих ордерів
-        handle_traps_timeout_and_fills()
-        
-        # Крок 4. Запускаємо стеження модуля "Катапульта" за діючими угодами
-        manage_open_positions()
-        
-        # Крок 5. Вивід великого звіту один раз на 5 хвилин (300 секунд)
-        if report_timer >= 300:
-            print_system_report()
-            report_timer = 0
-            
-        time.sleep(10)  # Пауза між ітераціями циклу (10 секунд)
-        report_timer += 10
+    main_cycle()
