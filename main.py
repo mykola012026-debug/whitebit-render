@@ -28,6 +28,7 @@ SL_PERCENT = 0.006
 VOLUME_THRESHOLD_MIN = 1.1   
 VOLUME_THRESHOLD_MAX = 1.4
 
+# Тепер тут зберігаються пастки з ключем [order_id] замість [symbol]
 active_traps = {}
 last_heartbeat_hour = -1
 
@@ -107,30 +108,28 @@ def has_active_position(symbol):
     except:
         return False
 
-# --- 🔥 НОВА ФУНКЦІЯ СИНХРОНІЗАЦІЇ ПРИ ПЕРЕЗАПУСКУ ---
+# --- 🔥 ВИПРАВЛЕНА ФУНКЦІЯ СИНХРОНІЗАЦІЇ ПРИ ПЕРЕЗАПУСКУ ---
 def sync_existing_traps_on_startup():
-    """Знаходить на біржі вже відкриті лімітки і бере їх на контроль"""
+    """Знаходить на біржі абсолютно ВСІ відкриті лімітки за їх ID та бере під контроль"""
     global active_traps
     print("🔄 Сканування біржі на наявність раніше відкритих ліміток...")
     try:
         for symbol in SYMBOLS:
             open_orders = exchange.fetch_open_orders(symbol)
             for order in open_orders:
-                # Нам потрібні тільки звичайні лімітки (не стоп-ордери захисту)
                 if order['type'] == 'limit':
-                    # Оскільки ми не знаємо точний індекс свічки створення, ставимо поточний
-                    # Це захистить ордер від негайного видалення, давши йому ще 30 хв життя
                     closes, _ = get_crypto_close_and_volume(symbol, TIMEFRAME_TRADE)
                     current_idx = len(closes) if closes else 100
 
-                    active_traps[symbol] = {
-                        'order_id': order['id'],
+                    # Ключ тепер - ID ордера. Дублікати більше не затирають один одного!
+                    active_traps[order['id']] = {
+                        'symbol': symbol,
                         'placed_at_candle_idx': current_idx,
                         'side': order['side'],
                         'target_price': float(order['price']),
                         'amount': float(order['amount'])
                     }
-                    print(f"🔗 Знайдено та взято під контроль ордер {order['side'].upper()} по {symbol} (ID: {order['id']})")
+                    print(f"🔗 Знайдено та взято під контроль ордер {order['side'].upper()} по {symbol} (ID: {order['id']}) на ціні {order['price']}")
         print(f"✅ Синхронізація завершена. Взято під контроль пасток: {len(active_traps)}")
     except Exception as e:
         print(f"⚠️ Не вдалося синхронізувати старі ордери: {e}")
@@ -163,33 +162,36 @@ def set_tp_sl_protection(symbol, side, filled_price, amount):
     except Exception as e:
         print(f"❌ Помилка під час спроби встановити захист TP/SL для {symbol}: {e}")
 
-def handle_traps_timeout(current_candle_idx, symbol):
-    if symbol not in active_traps: return
-    trap = active_traps[symbol]
+# --- 🔥 ВИПРАВЛЕНА ФУНКЦІЯ ТАЙМАУТУ ЗА ID ---
+def handle_traps_timeout(current_candle_idx, order_id):
+    if order_id not in active_traps: return
+    trap = active_traps[order_id]
+    symbol = trap['symbol']
     try:
-        order = exchange.fetch_order(trap['order_id'], symbol)
-        
+        order = exchange.fetch_order(order_id, symbol)
+
         if order['status'] == 'closed':
             print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Ордер повністю виконано по {symbol}!")
             filled_price = float(order.get('average') or order.get('price') or trap['target_price'])
             amount = float(order.get('amount', trap['amount']))
             side = trap['side']
-            
+
             set_tp_sl_protection(symbol, side, filled_price, amount)
-            del active_traps[symbol]
-            return
-            
-        elif order['status'] == 'canceled':
-            del active_traps[symbol]
+            del active_traps[order_id]
             return
 
+        elif order['status'] == 'canceled':
+            del active_traps[order_id]
+            return
+
+        # Перевірка на 30 хвилин (2 свічки по 15м)
         if current_candle_idx - trap['placed_at_candle_idx'] >= 2:
-            print(f"⏰ [ТАЙМАУТ ПАСТКИ] Минуло 30 хв. Видаляємо лімітку по {symbol}")
-            exchange.cancel_order(trap['order_id'], symbol)
-            del active_traps[symbol]
-            
+            print(f"⏰ [ТАЙМАУТ ПАСТКИ] Минуло 30 хв. Видаляємо лімітку по {symbol} (ID: {order_id})")
+            exchange.cancel_order(order_id, symbol)
+            del active_traps[order_id]
+
     except Exception as e:
-        print(f"❌ Помилка перевірки стану пастки для {symbol}: {e}")
+        print(f"❌ Помилка перевірки стану пастки ID {order_id} для {symbol}: {e}")
 
 def manage_open_positions():
     try:
@@ -215,8 +217,8 @@ def manage_open_positions():
 def main_cycle():
     global last_heartbeat_hour
     print(f"🤖 Бот Lyra V2 з авто-синхронізацією ліміток запущений.")
-    
-    # Запускаємо синхронізацію ОДИН РАЗ при старті
+
+    # Синхронізація при старті
     sync_existing_traps_on_startup()
 
     while True:
@@ -230,8 +232,7 @@ def main_cycle():
                 try:
                     exchange.options['accountsByType'] = {'swap': 'collateral'}
                     balance = exchange.fetch_balance()
-                    
-                    # ПОВНІСТЮ ВИПРАВЛЕНИЙ ПАРСИНГ Ф'ЮЧЕРСНОГО БАЛАНСУ WHITEBIT
+
                     usdt_total = float(balance.get('total', {}).get('USDT', 0.0) or 0.0)
                     usdt_free = float(balance.get('free', {}).get('USDT', 0.0) or 0.0)
                     usdt_used = float(balance.get('used', {}).get('USDT', 0.0) or 0.0)
@@ -257,8 +258,8 @@ def main_cycle():
 
                 print("\n📦 АКТИВНІ ПАСТКИ В ПАМ'ЯТІ:")
                 if active_traps:
-                    for s, t in active_traps.items():
-                        print(f"   • [{s}] Лімітний ордер {t['side'].upper()} чекає на ціні {t['target_price']}. ID: {t['order_id']}")
+                    for id_ord, t in active_traps.items():
+                        print(f"   • [{t['symbol']}] Лімітний ордер {t['side'].upper()} чекає на ціні {t['target_price']}. ID: {id_ord}")
                 else:
                     print("   • Жодних виставлених ліміток зараз немає.")
 
@@ -269,6 +270,12 @@ def main_cycle():
             # --- ОСНОВНА ТОРГОВА ЛОГІКА ---
             manage_open_positions()
 
+            # Обробка таймаутів для ВСІХ ордерів у пам'яті
+            for order_id in list(active_traps.keys()):
+                closes, _ = get_crypto_close_and_volume(active_traps[order_id]['symbol'], TIMEFRAME_TRADE)
+                if closes:
+                    handle_traps_timeout(len(closes), order_id)
+
             for symbol in SYMBOLS:
                 if has_active_position(symbol): continue
 
@@ -276,8 +283,10 @@ def main_cycle():
                 if not closes or not volumes: continue
 
                 current_candle_idx = len(closes)
-                handle_traps_timeout(current_candle_idx, symbol)
-                if symbol in active_traps: continue
+                
+                # 🔥 ОБМЕЖЕННЯ: Перевіряємо, чи вже є ХОЧ ОДИН активний ордер по цьому символу
+                has_trap_for_symbol = any(t['symbol'] == symbol for t in active_traps.values())
+                if has_trap_for_symbol: continue
 
                 ema_12 = calculate_ema(closes, 12)
                 rsi = calculate_rsi(closes, 14)
@@ -293,11 +302,9 @@ def main_cycle():
                         print(f"🕸️ [ПАСТКА LONG] {symbol}. Коеф: {dynamic_coef:.2f}. Лімітка на EMA-12: {ema_12}")
 
                         raw_amount = BASE_POSITION_VOLUME / ema_12
-                        
                         market_info = exchange.market(symbol)
                         min_qty = float(market_info['limits']['amount']['min'] or 0.001)
-                        if raw_amount < min_qty:
-                            raw_amount = min_qty
+                        if raw_amount < min_qty: raw_amount = min_qty
 
                         amount = float(exchange.amount_to_precision(symbol, raw_amount))
                         price = float(exchange.price_to_precision(symbol, ema_12))
@@ -305,9 +312,9 @@ def main_cycle():
                         try:
                             order = exchange.create_order(symbol, 'limit', 'buy', amount, price)
                             print(f"✅ Лімітний ордер виставлено! ID: {order['id']}")
-                            
-                            active_traps[symbol] = {
-                                'order_id': order['id'], 
+
+                            active_traps[order['id']] = {
+                                'symbol': symbol,
                                 'placed_at_candle_idx': current_candle_idx,
                                 'side': 'buy',
                                 'target_price': price,
@@ -323,11 +330,9 @@ def main_cycle():
                         print(f"🕸️ [ПАСТКА SHORT] {symbol}. Коеф: {dynamic_coef:.2f}. Лімітка на EMA-12: {ema_12}")
 
                         raw_amount = BASE_POSITION_VOLUME / ema_12
-                        
                         market_info = exchange.market(symbol)
                         min_qty = float(market_info['limits']['amount']['min'] or 0.001)
-                        if raw_amount < min_qty:
-                            raw_amount = min_qty
+                        if raw_amount < min_qty: raw_amount = min_qty
 
                         amount = float(exchange.amount_to_precision(symbol, raw_amount))
                         price = float(exchange.price_to_precision(symbol, ema_12))
@@ -335,9 +340,9 @@ def main_cycle():
                         try:
                             order = exchange.create_order(symbol, 'limit', 'sell', amount, price)
                             print(f"✅ Лімітний ордер виставлено! ID: {order['id']}")
-                            
-                            active_traps[symbol] = {
-                                'order_id': order['id'], 
+
+                            active_traps[order['id']] = {
+                                'symbol': symbol,
                                 'placed_at_candle_idx': current_candle_idx,
                                 'side': 'sell',
                                 'target_price': price,
