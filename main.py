@@ -70,15 +70,35 @@ def get_active_positions():
         print(f"⚠️ Помилка запиту реальних позицій: {e}")
     return real_positions
 
+def get_position_protection_levels(symbol):
+    """Пошук виставлених TP/SL ордерів на біржі для відображення в логах"""
+    tp, sl = "НЕМАЄ", "НЕМАЄ"
+    try:
+        open_orders = exchange.fetch_open_orders(symbol)
+        for order in open_orders:
+            stop_price = safe_float(order.get('stopPrice'))
+            if stop_price > 0:
+                # На основі типу чи коментарів розрізняємо, але найпростіше — за поточною структурою
+                # Для шорту: SL вище ціни входу, TP нижче ціни входу. Для лонгу навпаки.
+                # Спрощено запишемо ціну як тригер
+                if order.get('params', {}).get('type') == 'stop_market' or order.get('stopPrice'):
+                    # Додамо всі знайдені стоп-ціни для інфо
+                    if tp == "НЕМАЄ": tp = f"{stop_price:.4f}"
+                    else: sl = f"{stop_price:.4f}"
+    except: pass
+    return tp, sl
+
 def clean_orphan_orders(symbol):
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
         if open_orders:
-            print(f"🧹 [ДВІРНИК] Очищення залишків по {symbol}...")
+            # Видаляємо тільки звичайні лімітки (у яких немає stopPrice)
             for order in open_orders:
-                exchange.cancel_order(order['id'], symbol)
-                print(f"   ✅ Ордер ID {order['id']} скасовано.")
+                if not order.get('stopPrice'):
+                    print(f"🧹 [ДВІРНИК] Очищення лімітки по {symbol}...")
+                    exchange.cancel_order(order['id'], symbol)
+                    print(f"   ✅ Ордер ID {order['id']} скасовано.")
     except Exception:
         pass
 
@@ -214,7 +234,11 @@ def main_cycle():
                         p = real_positions[symbol]
                         p_size = safe_float(p.get('contracts') or p.get('info', {}).get('amount'))
                         pnl = safe_float(p.get('unrealizedPnl') or p.get('info', {}).get('pnl'))
-                        pos_status = f"Є ПОЗИЦІЯ ({'LONG' if p_size > 0 else 'SHORT'}) | PnL: {pnl:.2f} USDT"
+                        
+                        # Отримуємо виставлені рівні захисту з біржі
+                        tp_val, sl_val = get_position_protection_levels(symbol)
+                        pos_status = f"Є ПОЗИЦІЯ ({'LONG' if p_size > 0 else 'SHORT'}) | PnL: {pnl:.2f} USDT | Захист (TP: {tp_val} / SL: {sl_val})"
+                        
                     elif symbol in active_traps:
                         rem_time = TIMEOUT_SECONDS - (time.time() - active_traps[symbol]['placed_time'])
                         rem_min = max(0.0, rem_time / 60)
