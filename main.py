@@ -15,7 +15,7 @@ LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
 TP_PERCENT = 0.025          # +2.5% (при 10х = +25% до маржі)
 SL_PERCENT = 0.012          # -1.2% (при 10х = -12% до маржі)
-TIMEOUT_SECONDS = 3600      # 30 хвилин у секундах для таймауту ліміток
+TIMEOUT_SECONDS = 3600      # 1 година (60 хвилин) у секундах для таймауту ліміток
 
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
@@ -124,7 +124,6 @@ def sync_existing_traps_on_startup():
             open_orders = exchange.fetch_open_orders(symbol)
             for order in open_orders:
                 if order.get('status') == 'open' and not order.get('stopPrice'):
-                    # При підхопленні старих ліміток ставимо поточний час як точку старту
                     active_traps[symbol] = {
                         'order_id': str(order['id']),
                         'placed_time': time.time(),
@@ -144,8 +143,7 @@ def handle_traps_and_timeouts(symbol):
         set_exchange_context()
         order = exchange.fetch_order(trap['order_id'], symbol)
 
-       if order['status'] in ['closed', 'filled']:
-
+        if order['status'] in ['closed', 'filled']:
             print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Лімітка виконана по {symbol}!")
             filled_price = safe_float(order.get('average') or order.get('price') or trap['price'])
             amount = safe_float(order.get('amount', trap['amount']))
@@ -156,7 +154,6 @@ def handle_traps_and_timeouts(symbol):
         elif order['status'] == 'canceled':
             del active_traps[symbol]
 
-        # Фікс: Перевірка таймауту за РЕАЛЬНИМ часом в секундах
         elif time.time() - trap['placed_time'] >= TIMEOUT_SECONDS:
             elapsed_mins = (time.time() - trap['placed_time']) / 60
             print(f"⏰ [ТАЙМАУТ] Лімітка по {symbol} висить вже {elapsed_mins:.1f} хв. Видаляємо...")
@@ -235,14 +232,12 @@ def main_cycle():
                 if symbol in real_positions: 
                     continue  
 
-                # Перевіряємо статус поточної пастки та її таймаут
                 handle_traps_and_timeouts(symbol)
                 if symbol in active_traps: continue
 
                 closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
                 if not closes_15m or len(volumes_15m) < 21: continue
 
-                # Аналіз умов для пастки
                 ema_12 = calculate_ema(closes_15m, 12)
                 avg_vol_20 = sum(volumes_15m[-21:-1]) / 20  
                 global_trend, _ = check_global_trend(symbol)
