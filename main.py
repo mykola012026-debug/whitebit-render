@@ -15,7 +15,7 @@ LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
 TP_PERCENT = 0.025          # +2.5% (при 10х = +25% до маржі)
 SL_PERCENT = 0.012          # -1.2% (при 10х = -12% до маржі)
-TIMEOUT_SECONDS = 1800      # 30 хвилин у секундах для таймауту ліміток
+TIMEOUT_SECONDS = 3600      # 30 хвилин у секундах для таймауту ліміток
 
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
