@@ -87,7 +87,7 @@ def get_position_protection_levels(symbol):
     return tp, sl
 
 def clean_orphan_orders(symbol):
-    """🔥 МОДЕРНІЗОВАНИЙ ДВІРНИК: чистить лімітки без сигналу, а також закриває стопи-сироти, якщо позиції немає"""
+    """МОДЕРНІЗОВАНИЙ ДВІРНИК: чистить лімітки без сигналу, а також закриває стопи-сироти, якщо позиції немає"""
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
@@ -99,7 +99,7 @@ def clean_orphan_orders(symbol):
                     exchange.cancel_order(order['id'], symbol)
                     print(f"   ✅ Ордер ID {order['id']} скасовано.")
                 
-                # 2. Якщо це стоп-ордер (є stopPrice), але позиції по монеті вже НЕМАЄ (наслідок ручного закриття або збою)
+                # 2. Якщо це стоп-ордер (є stopPrice), але позиції по монеті вже НЕМАЄ
                 elif order.get('stopPrice'):
                     real_positions = get_active_positions()
                     if symbol not in real_positions:
@@ -125,22 +125,18 @@ def control_and_protect_positions(real_positions):
             has_breakeven_sl = False
             old_sl_id = None
 
-            # Перевіряємо, які стоп-ордери вже є на біржі
             for order in open_orders:
                 o_price = safe_float(order.get('stopPrice') or order.get('info', {}).get('stopPrice'))
                 if o_price > 0:
-                    # Перевірка на безубиток (стоїть близько до ціни входу)
                     if abs(o_price - entry_price) / entry_price < 0.001:
                         has_breakeven_sl = True
                         has_sl = True
-                    # Визначення звичайного SL чи TP
                     elif (is_long and o_price < entry_price) or (not is_long and o_price > entry_price):
                         has_sl = True
                         old_sl_id = order['id']
                     else:
                         has_tp = True
 
-            # 🔥 1. АВТО-ЗАХИСТ (Якщо пастка спрацювала, а стопів немає взагалі)
             if not has_sl or not has_tp:
                 print(f"⚠️ [КОНТРОЛЬ] Виявлено незахищену позицію по {symbol}! Ставимо параметри захисту...")
                 sl_side = 'sell' if is_long else 'buy'
@@ -166,11 +162,10 @@ def control_and_protect_positions(real_positions):
                 if symbol in active_traps: del active_traps[symbol]
                 continue
 
-            # 🔥 2. МОДУЛЬ БЕЗЗБИТКОВОСТІ (Твій алгоритм переносу)
             target_pnl_to_activate = BASE_POSITION_VOLUME * LEVERAGE * TP_PERCENT * BREAKEVEN_TRIGGER_PCT
             if unrealized_pnl >= target_pnl_to_activate:
                 if has_breakeven_sl:
-                    continue  # Вже захищено в 0
+                    continue  
 
                 print(f"🚀 [БЕЗЗБИТОК] Позиція {symbol} дала гарний профіт ({unrealized_pnl:.2f} USDT). Переносимо SL у нуль...")
 
@@ -273,11 +268,10 @@ def main_cycle():
             current_time = datetime.now()
             real_positions = get_active_positions()
 
-            # 🔥 ВИКЛИК АВТО-ЗАХИСТУ ТА БЕЗЗБИТКОВОСТІ
             if real_positions:
                 control_and_protect_positions(real_positions)
 
-            # --- ЩОГОДИННИЙ ЗВІТ ---
+            # --- ЩОГОДИННИЙ ІНФОРМАТИВНИЙ ЗВІТ ---
             if current_time.hour != last_heartbeat_hour:
                 print(f"\n⚡ [{current_time.strftime('%H:%M:%S')}] ========== МАКСИМАЛЬНИЙ ЗВІТ СИСТЕМИ ==========")
                 try:
@@ -288,6 +282,22 @@ def main_cycle():
                 print("\n📊 СТАН РИНКУ, ПОЗИЦІЙ ТА ЛІМІТОК:")
                 for symbol in SYMBOLS:
                     trend, last_p = check_global_trend(symbol)
+                    
+                    # Витягуємо свіжі дані об'ємів та EMA для звіту
+                    closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
+                    vol_ratio_str = "0.00x"
+                    dev_str = "0.00%"
+                    
+                    if closes_15m and len(volumes_15m) >= 21:
+                        ema_12 = calculate_ema(closes_15m, 12)
+                        avg_vol_20 = sum(volumes_15m[-21:-1]) / 20
+                        vol_ratio = volumes_15m[-2] / avg_vol_20 if avg_vol_20 > 0 else 0
+                        vol_ratio_str = f"{vol_ratio:.2f}x"
+                        
+                        if ema_12 > 0:
+                            dev_pct = ((closes_15m[-1] - ema_12) / ema_12) * 100
+                            dev_str = f"{dev_pct:+.2f}%"
+
                     pos_status = "Вільна"
                     if symbol in real_positions:
                         p = real_positions[symbol]
@@ -302,13 +312,14 @@ def main_cycle():
                         rem_min = max(0.0, rem_time / 60)
                         pos_status = f"ЧЕКАЄ ЛІМІТКА ({active_traps[symbol]['side'].upper()}) по {active_traps[symbol]['price']} (Таймаут через: {rem_min:.1f} хв)"
 
-                    print(f"  • {symbol:<15} | Тренд 1h: {trend:<10} | Ціна: {last_p:<9.4f} | Стан: {pos_status}")
+                    # Виводимо розширений рядок моніторингу
+                    print(f"  • {symbol:<15} | Тренд: {trend:<10} | Об'єм: {vol_ratio_str:<6} | До EMA-12: {dev_str:<7} | {pos_status}")
+                
                 print("==================================================================\n")
                 last_heartbeat_hour = current_time.hour
 
             # --- АНАЛІЗ ТА ТОРГІВЛЯ ---
             for symbol in SYMBOLS:
-                # 🔥 ТЕПЕР ТУТ ДВІРНИК ТАКОЖ ЗНОСИТЬ СТОПИ-СИРОТИ ДЛЯ ВІЛЬНИХ МОНЕТ
                 clean_orphan_orders(symbol)
 
                 if symbol in real_positions: 
