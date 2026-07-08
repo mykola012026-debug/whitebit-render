@@ -10,7 +10,7 @@ SYMBOLS = [
 TIMEFRAME_TRADE = '15m'
 TIMEFRAME_TREND = '1h'
 
-BASE_POSITION_VOLUME = 5.5  # Об'єм входу в USDT
+BASE_POSITION_VOLUME = 10  # Об'єм входу в USDT
 LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
 TP_PERCENT = 0.016          # +2.5% (при 10х = +25% до маржі)
