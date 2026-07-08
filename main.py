@@ -18,7 +18,7 @@ SL_PERCENT = 0.009          # -1.2% (при 10х = -12% до маржі)
 TIMEOUT_SECONDS = 3600      # 1 година у секундах для таймауту ліміток
 
 # Коефіцієнт активації безубитку (0.4 = 40% від цілі Take Profit)
-BREAKEVEN_TRIGGER_PCT = 0.7  
+BREAKEVEN_TRIGGER_PCT = 0.44  
 
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
