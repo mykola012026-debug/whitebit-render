@@ -12,9 +12,10 @@ TIMEFRAME_TREND = '1h'
 
 BASE_POSITION_VOLUME = 5.5  # Об'єм входу в USDT
 LEVERAGE = 10
-VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.6)
+VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.2)
 TP_PERCENT = 0.025          # +2.5% (при 10х = +25% до маржі)
 SL_PERCENT = 0.012          # -1.2% (при 10х = -12% до маржі)
+TIMEOUT_SECONDS = 1800      # 30 хвилин у секундах для таймауту ліміток
 
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1',
@@ -56,7 +57,6 @@ def set_exchange_context():
     exchange.options['accountsByType'] = {'swap': 'collateral'}
 
 def get_active_positions():
-    """ КРОК 4: Моніторить і повертає всі реальні позиції на біржі """
     set_exchange_context()
     real_positions = {}
     try:
@@ -71,7 +71,6 @@ def get_active_positions():
     return real_positions
 
 def clean_orphan_orders(symbol):
-    """ КРОК 5: Видаляє все зайве (ордери-сироти) по парі, якщо позиції немає """
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
@@ -83,11 +82,11 @@ def clean_orphan_orders(symbol):
     except Exception:
         pass
 
-# --- КРОК 3: ЗАХИСТ СТОПАМИ (МАРКЕТ-СТОПИ З TRIGGERPRICE) ---
+# --- ЗАХИСТ СТОПАМИ ---
 def set_tp_sl_protection(symbol, side, filled_price, amount_contracts):
     try:
         sl_side = 'sell' if side == 'buy' else 'buy'
-        
+
         if side == 'buy':
             sl_price = filled_price * (1 - SL_PERCENT)
             tp_price = filled_price * (1 + TP_PERCENT)
@@ -100,36 +99,35 @@ def set_tp_sl_protection(symbol, side, filled_price, amount_contracts):
         precise_amount = float(exchange.amount_to_precision(symbol, amount_contracts))
 
         print(f"🛡️ Виставляємо TP/SL захист для {symbol} ({side.upper()})")
-        
+
         # Stop Loss
         exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_sl})
         print(f"   🛑 Stop Loss: {precise_sl}")
-        
+
         # Take Profit
         exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_tp})
         print(f"   🟢 Take Profit: {precise_tp}")
-        
+
     except Exception as e:
         print(f"❌ Помилка встановлення захисту для {symbol}: {e}")
 
-# --- КРОК 1 & 5: СИНХРОНІЗАЦІЯ ПАСТОК ТА МОНІТОР СТАНУ ---
+# --- СИНХРОНІЗАЦІЯ ПАСТОК ТА МОНІТОР СТАНУ ---
 def sync_existing_traps_on_startup():
     global active_traps
     print("🔄 Сканування біржі на наявність відкритих ліміток...")
     set_exchange_context()
     real_positions = get_active_positions()
-    
+
     for symbol in SYMBOLS:
         if symbol in real_positions: continue
         try:
             open_orders = exchange.fetch_open_orders(symbol)
             for order in open_orders:
-                # Шукаємо саме вхідні лімітки (у них зазвичай немає stopPrice в info)
                 if order.get('status') == 'open' and not order.get('stopPrice'):
-                    closes, _ = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
+                    # При підхопленні старих ліміток ставимо поточний час як точку старту
                     active_traps[symbol] = {
                         'order_id': str(order['id']),
-                        'placed_idx': len(closes) if closes else 100,
+                        'placed_time': time.time(),
                         'side': order['side'].lower(),
                         'price': safe_float(order.get('price')),
                         'amount': safe_float(order.get('amount'))
@@ -139,7 +137,7 @@ def sync_existing_traps_on_startup():
             pass
     print(f"✅ Синхронізація завершена. Активних пасток: {len(active_traps)}")
 
-def handle_traps_and_timeouts(symbol, current_idx):
+def handle_traps_and_timeouts(symbol):
     if symbol not in active_traps: return
     trap = active_traps[symbol]
     try:
@@ -150,19 +148,21 @@ def handle_traps_and_timeouts(symbol, current_idx):
             print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Лімітка виконана по {symbol}!")
             filled_price = safe_float(order.get('average') or order.get('price') or trap['price'])
             amount = safe_float(order.get('amount', trap['amount']))
-            
+
             set_tp_sl_protection(symbol, trap['side'], filled_price, amount)
             del active_traps[symbol]
-            
+
         elif order['status'] == 'canceled':
             del active_traps[symbol]
-            
-        elif current_idx - trap['placed_idx'] >= 2:  # 2 свічки по 15м = 30 хвилин таймаут
-            print(f"⏰ [ТАЙМАУТ] Видаляємо застарілу лімітку по {symbol}...")
+
+        # Фікс: Перевірка таймауту за РЕАЛЬНИМ часом в секундах
+        elif time.time() - trap['placed_time'] >= TIMEOUT_SECONDS:
+            elapsed_mins = (time.time() - trap['placed_time']) / 60
+            print(f"⏰ [ТАЙМАУТ] Лімітка по {symbol} висить вже {elapsed_mins:.1f} хв. Видаляємо...")
             try: exchange.cancel_order(trap['order_id'], symbol)
             except: pass
             del active_traps[symbol]
-            
+
     except Exception as e:
         if "NOT_FOUND" in str(e).upper():
             if symbol in active_traps: del active_traps[symbol]
@@ -172,7 +172,7 @@ def place_trap_order(symbol, side, price):
     try:
         amount_usdt = BASE_POSITION_VOLUME * LEVERAGE
         amount_contracts = amount_usdt / price
-        
+
         market_info = exchange.market(symbol)
         min_qty = safe_float(market_info['limits']['amount']['min'], 0.001)
         if amount_contracts < min_qty: amount_contracts = min_qty
@@ -200,7 +200,7 @@ def main_cycle():
             current_time = datetime.now()
             real_positions = get_active_positions()
 
-            # --- КРОК 4: ЩОГОДИННИЙ ЗВІТ СИСТЕМИ ---
+            # --- ЩОГОДИННИЙ ЗВІТ ---
             if current_time.hour != last_heartbeat_hour:
                 print(f"\n⚡ [{current_time.strftime('%H:%M:%S')}] ========== МАКСИМАЛЬНИЙ ЗВІТ СИСТЕМИ ==========")
                 try:
@@ -218,51 +218,51 @@ def main_cycle():
                         pnl = safe_float(p.get('unrealizedPnl') or p.get('info', {}).get('pnl'))
                         pos_status = f"Є ПОЗИЦІЯ ({'LONG' if p_size > 0 else 'SHORT'}) | PnL: {pnl:.2f} USDT"
                     elif symbol in active_traps:
-                        pos_status = f"ЧЕКАЄ ЛІМІТКА ({active_traps[symbol]['side'].upper()}) по {active_traps[symbol]['price']}"
-                    
+                        rem_time = TIMEOUT_SECONDS - (time.time() - active_traps[symbol]['placed_time'])
+                        rem_min = max(0.0, rem_time / 60)
+                        pos_status = f"ЧЕКАЄ ЛІМІТКА ({active_traps[symbol]['side'].upper()}) по {active_traps[symbol]['price']} (Таймаут через: {rem_min:.1f} хв)"
+
                     print(f"  • {symbol:<15} | Тренд 1h: {trend:<10} | Ціна: {last_p:<9.4f} | Стан: {pos_status}")
                 print("==================================================================\n")
                 last_heartbeat_hour = current_time.hour
 
             # --- АНАЛІЗ ТА ТОРГІВЛЯ ---
             for symbol in SYMBOLS:
-                # КРОК 5: Якщо позиції немає, але залишилися старі ордери-сироти (наприклад, стопи від минулої угоди) — чистимо їх
                 if symbol not in real_positions and symbol not in active_traps:
                     clean_orphan_orders(symbol)
 
                 if symbol in real_positions: 
-                    continue  # По монеті вже йде активна торгівля
+                    continue  
+
+                # Перевіряємо статус поточної пастки та її таймаут
+                handle_traps_and_timeouts(symbol)
+                if symbol in active_traps: continue
 
                 closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
                 if not closes_15m or len(volumes_15m) < 21: continue
 
-                current_idx = len(closes_15m)
-                handle_traps_and_timeouts(symbol, current_idx)
-                if symbol in active_traps: continue
-
                 # Аналіз умов для пастки
                 ema_12 = calculate_ema(closes_15m, 12)
-                avg_vol_20 = sum(volumes_15m[-21:-1]) / 20  # Середній об'єм без поточної свічки
+                avg_vol_20 = sum(volumes_15m[-21:-1]) / 20  
                 global_trend, _ = check_global_trend(symbol)
 
-                # Перевірка на аномальний об'єм на попередній закритій свічці
                 if volumes_15m[-2] > (avg_vol_20 * VOLUME_MULTIPLIER):
-                    
+
                     # LONG пастка
                     if global_trend == "LONG_ONLY" and closes_15m[-1] > ema_12:
                         print(f"🕸️ [СИГНАЛ LONG] {symbol}. Об'єм аномальний. Ставимо лімітку на EMA-12: {ema_12:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'buy', ema_12)
                         if oid:
-                            active_traps[symbol] = {'order_id': oid, 'placed_idx': current_idx, 'side': 'buy', 'price': prc, 'amount': size}
+                            active_traps[symbol] = {'order_id': oid, 'placed_time': time.time(), 'side': 'buy', 'price': prc, 'amount': size}
 
                     # SHORT пастка
                     elif global_trend == "SHORT_ONLY" and closes_15m[-1] < ema_12:
                         print(f"🕸️ [СИГНАЛ SHORT] {symbol}. Об'єм аномальний. Ставимо лімітку на EMA-12: {ema_12:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'sell', ema_12)
                         if oid:
-                            active_traps[symbol] = {'order_id': oid, 'placed_idx': current_idx, 'side': 'sell', 'price': prc, 'amount': size}
+                            active_traps[symbol] = {'order_id': oid, 'placed_time': time.time(), 'side': 'sell', 'price': prc, 'amount': size}
 
-            time.sleep(15)  # Перевірка кожні 15 секунд
+            time.sleep(15)  
 
         except Exception as e:
             print(f"🚨 Помилка в головному циклі: {e}")
