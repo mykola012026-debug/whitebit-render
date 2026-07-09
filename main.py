@@ -15,7 +15,7 @@ TIMEFRAME_TREND = '1h'
 
 BASE_POSITION_VOLUME = 5.5  # Об'єм входу в USDT
 LEVERAGE = 10
-VOLUME_MULTIPLIER = 1.4     # Аномальний об'єм (> ніж середній * 1.4)
+VOLUME_MULTIPLIER = 1.2     # Аномальний об'єм (> ніж середній * 1.4)
 TP_PERCENT = 0.006          # +0.6% від ціни (при 10х = +6% до маржі)
 SL_PERCENT = 0.010          # -1.0% від ціни (при 10х = -10% до маржі)
 TIMEOUT_SECONDS = 3600      # 1 година у секундах для таймауту ліміток
