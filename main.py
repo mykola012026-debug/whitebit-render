@@ -13,7 +13,7 @@ SYMBOLS = [
 TIMEFRAME_TRADE = '15m'
 TIMEFRAME_TREND = '1h'
 
-BASE_POSITION_VOLUME = 10  # Об'єм входу в USDT
+BASE_POSITION_VOLUME = 6  # Об'єм входу в USDT
 LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.1     # Знижена планка, фільтрація йде за рахунок глибини відступу
 
