@@ -16,11 +16,14 @@ TIMEFRAME_TREND = '1h'
 BASE_POSITION_VOLUME = 5.5  # Об'єм входу в USDT
 LEVERAGE = 10
 VOLUME_MULTIPLIER = 1.4     # Аномальний об'єм (> ніж середній * 1.4)
-TP_PERCENT = 0.006          # +0.6% від ціни (при 10х = +6% до маржі)
-SL_PERCENT = 0.010          # -1.0% від ціни (при 10х = -10% до маржі)
-TIMEOUT_SECONDS = 3600      # 1 година у секундах для таймауту ліміток
 
-# Коефіцієнт активації безубитку (0.7 = 70% від цілі Take Profit, тобто ~0.42% руху ціни)
+# --- ОПТИМІЗАЦІЯ РИЗИКІВ ТА ПАСТОК ---
+TP_PERCENT = 0.008          # +0.8% від ціни (при 10х = +8% до маржі)
+SL_PERCENT = 0.006          # -0.6% від ціни (при 10х = -6% до маржі) -> Коротший стоп для зрізання збитків
+TIMEOUT_SECONDS = 3600      # 1 година (лімітка сидить у засідці й чекає на технічний мікро-відкат)
+TRAP_OFFSET_PCT = 0.004     # 0.4% відступ для пастки (захист від входу на хаях імпульсу)
+
+# Коефіцієнт активації безубитку (0.7 = 70% від цілі Take Profit)
 BREAKEVEN_TRIGGER_PCT = 0.7  
 
 exchange = ccxt.whitebit({
@@ -90,7 +93,7 @@ def get_position_protection_levels(symbol):
     return tp, sl
 
 def clean_orphan_orders(symbol):
-    """ІНТЕЛЕКТУАЛЬНИЙ ДВІРНИК: перевіряє доцільність утримання лімітки та зачищає хвости"""
+    """ІНТЕЛЕКТУАЛЬНИЙ ДВІРНИК: зачищає хвости, але дає лімітці висіти годину під час затухання об'єму"""
     try:
         set_exchange_context()
         open_orders = exchange.fetch_open_orders(symbol)
@@ -99,31 +102,25 @@ def clean_orphan_orders(symbol):
                 # 1. Робота зі звичайними лімітками на вхід (у них немає stopPrice)
                 if not order.get('stopPrice'):
 
-                    # Витягуємо свіжу математику ринку, щоб перевірити актуальність сигналу
-                    closes_15m, volumes_15m = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
-                    if closes_15m and len(volumes_15m) >= 21:
+                    # Витягуємо свіжу математику ринку для контролю тренду
+                    closes_15m, _ = get_ohlcv_data(symbol, TIMEFRAME_TRADE)
+                    if closes_15m and len(closes_15m) >= 21:
                         ema_12 = calculate_ema(closes_15m, 12)
-                        avg_vol_20 = sum(volumes_15m[-21:-1]) / 20
-                        current_vol = volumes_15m[-2]
                         global_trend, _ = check_global_trend(symbol)
 
-                        vol_ratio = current_vol / avg_vol_20 if avg_vol_20 > 0 else 0
-
-                        # Шукаємо причину, чому лімітку треба прибрати
+                        # Шукаємо ТІЛЬКИ критичні причини для скасування (злам структури тренду)
                         reason = ""
-                        if vol_ratio < VOLUME_MULTIPLIER:
-                            reason = f"аномальний об'єм зник, поточний: {vol_ratio:.2f}x (треба > {VOLUME_MULTIPLIER}x)"
-                        elif global_trend == "LONG_ONLY" and closes_15m[-1] <= ema_12:
+                        if global_trend == "LONG_ONLY" and closes_15m[-1] <= ema_12:
                             reason = f"ціна випала з лонгового тренду нижче EMA-12 ({closes_15m[-1]:.4f})"
                         elif global_trend == "SHORT_ONLY" and closes_15m[-1] >= ema_12:
                             reason = f"ціна випала з шортового тренду вище EMA-12 ({closes_15m[-1]:.4f})"
 
-                        # Якщо причина знайдена — скасовуємо лімітку з поясненням у лог
+                        # Якщо тренд зламався — скасовуємо. Якщо просто впав об'єм — ігноруємо і чекаємо далі!
                         if reason:
                             print(f"🧹 [ДВІРНИК] Скасування лімітки по {symbol} (ID: {order['id']}):")
                             print(f"   ℹ️ Причина: {reason}.")
                             exchange.cancel_order(order['id'], symbol)
-                            print(f"   ✅ Лімітку успешно прибрано з ринку.")
+                            print(f"   ✅ Лімітку успішно прибрано з ринку.")
                             if symbol in active_traps: 
                                 del active_traps[symbol]
 
@@ -243,7 +240,7 @@ def handle_traps_and_timeouts(symbol):
         order = exchange.fetch_order(trap['order_id'], symbol)
 
         if order['status'] in ['closed', 'filled']:
-            print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Лімітка виконана по {symbol}! Передаємо под контроль авто-захисту.")
+            print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] Лімітка виконана по {symbol}! Передаємо під контроль авто-захисту.")
             del active_traps[symbol]
 
         elif order['status'] == 'canceled':
@@ -287,7 +284,7 @@ def sync_existing_traps_on_startup():
 # --- ГОЛОВНИЙ ЦИКЛ ---
 def main_cycle():
     global last_heartbeat_hour
-    print(f"🤖 Бот Lyra V2 [Оптимізований під WhiteBIT + Авто-Стопи] запущений.")
+    print(f"🤖 Бот Lyra V2 [Оптимізований під WhiteBIT + Захист від розпилу] запущений.")
     exchange.load_markets()
     sync_existing_traps_on_startup()
 
@@ -327,7 +324,7 @@ def main_cycle():
 
                     pos_status = "Вільна"
                     if symbol in real_positions:
-                        p = real_positions[real_positions] if isinstance(real_positions, str) else real_positions[symbol]
+                        p = real_positions[symbol]
                         p_size = safe_float(p.get('contracts') or p.get('info', {}).get('amount'))
                         pnl = safe_float(p.get('unrealizedPnl') or p.get('info', {}).get('pnl'))
 
@@ -364,17 +361,17 @@ def main_cycle():
                 if volumes_15m[-2] > (avg_vol_20 * VOLUME_MULTIPLIER):
                     current_price = closes_15m[-1]
 
-                    # LONG пастка: ставимо ордер на 0.15% нижче за поточну ціну (гарячий мікро-відкат)
+                    # LONG пастка: ловимо глибший мікро-відкат (TRAP_OFFSET_PCT)
                     if global_trend == "LONG_ONLY" and current_price > ema_12:
-                        target_entry = current_price * (1 - 0.0015)
+                        target_entry = current_price * (1 - TRAP_OFFSET_PCT)
                         print(f"🕸️ [СИГНАЛ LONG] {symbol}. Об'єм аномальний. Ставимо лімітку на мікро-відкат: {target_entry:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'buy', target_entry)
                         if oid:
                             active_traps[symbol] = {'order_id': oid, 'placed_time': time.time(), 'side': 'buy', 'price': prc, 'amount': size}
 
-                    # SHORT пастка: ставимо ордер на 0.15% вище за поточну ціну (гарячий мікро-відскок)
+                    # SHORT пастка: ловимо глибший мікро-відскок (TRAP_OFFSET_PCT)
                     elif global_trend == "SHORT_ONLY" and current_price < ema_12:
-                        target_entry = current_price * (1 + 0.0015)
+                        target_entry = current_price * (1 + TRAP_OFFSET_PCT)
                         print(f"🕸️ [СИГНАЛ SHORT] {symbol}. Об'єм аномальний. Ставимо лімітку на мікро-відскок: {target_entry:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'sell', target_entry)
                         if oid:
