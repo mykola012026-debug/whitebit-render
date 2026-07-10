@@ -45,11 +45,30 @@ def protect(positions):
                 if not has_tp: 
                     exchange.create_order(s, 'market', 'sell' if is_long else 'buy', abs(size), {'stopPrice': float(exchange.price_to_precision(s, tp_prc))})
                     print(f"🟢 [PROTECT] {s.split('/')[0]} TP: {tp_prc:.4f}")
-        except Exception as e: print(f"Err {s}: {e}")
+                if s in active_traps: del active_traps[s]
+        except Exception as e: print(f"Err protect {s}: {e}")
 
 def cleaner(s, positions):
     try:
         if s in history_cache and s not in positions: del history_cache[s]
+        
+        # Обробка статусів та таймаутів активних пасток
+        if s in active_traps:
+            o = exchange.fetch_order(active_traps[s]['id'], s)
+            if o['status'] in ['closed', 'filled']:
+                print(f"🕸️ [TRAP FILLED] {s.split('/')[0]} | Позицію відкрито.")
+                del active_traps[s]
+                return
+            elif o['status'] == 'canceled':
+                del active_traps[s]
+                return
+            elif time.time() - active_traps[s]['time'] >= TIMEOUT:
+                print(f"⏰ [TIMEOUT] {s.split('/')[0]} | Знімаємо лімітку.")
+                try: exchange.cancel_order(active_traps[s]['id'], s)
+                except: pass
+                del active_traps[s]
+                return
+
         for o in exchange.fetch_open_orders(s):
             if not o.get('stopPrice'):
                 c, _ = get_data(s)
@@ -59,6 +78,7 @@ def cleaner(s, positions):
                     if (trend == "LONG_ONLY" and c[-1] <= ema25) or (trend == "SHORT_ONLY" and c[-1] >= ema25):
                         exchange.cancel_order(o['id'], s)
                         print(f"🧹 [CLEAN] {s.split('/')[0]}")
+                        if s in active_traps: del active_traps[s]
     except: pass
 
 def main():
@@ -71,12 +91,12 @@ def main():
             
             curr = datetime.now()
             if curr.hour != last_hour:
-                print(f"\n📊 {curr.strftime('%H:%M')} | Оновлення...")
+                print(f"\n📊 {curr.strftime('%H:%M')} | Моніторинг активний...")
                 last_hour = curr.hour
             
             for s in SYMBOLS:
                 cleaner(s, pos)
-                if s in pos: continue
+                if s in pos or s in active_traps: continue  # Тепер чітко ігноруємо, якщо пастка вже є
                 
                 c, v = get_data(s)
                 if not c or len(c) < 25: continue
@@ -87,7 +107,9 @@ def main():
                     off = 0.003 if ratio >= 1.8 else 0.004 if ratio >= 1.4 else 0.005
                     target = c[-1] * (1 - off if trend == "LONG_ONLY" else 1 + off)
                     if (trend == "LONG_ONLY" and c[-1] > ema25) or (trend == "SHORT_ONLY" and c[-1] < ema25):
-                        exchange.create_order(s, 'limit', 'buy' if trend == "LONG_ONLY" else 'sell', (BASE_VOL*LEV)/target, target)
+                        order = exchange.create_order(s, 'limit', 'buy' if trend == "LONG_ONLY" else 'sell', (BASE_VOL*LEV)/target, target)
+                        # Записуємо в базу, щоб уникнути дублювання:
+                        active_traps[s] = {'id': order['id'], 'time': time.time()}
                         print(f"🕸️ [TRAP] {s.split('/')[0]} | {ratio:.1f}x | {target:.4f}")
             time.sleep(15)
         except Exception as e: print(f"Err cycle: {e}"); time.sleep(10)
