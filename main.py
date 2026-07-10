@@ -15,7 +15,7 @@ SYMBOLS = [
 ]
 
 TIMEFRAME_TRADE, TIMEFRAME_TREND = '15m', '1h'
-BASE_POSITION_VOLUME = 5.5  # Об'єм першої позиції в USDT
+BASE_POSITION_VOLUME = 10  # Об'єм першої позиції в USDT
 LEVERAGE = 10               # Плече
 VOLUME_MULTIPLIER = 1.1     # Тригер сплеску об'єму
 TIMEOUT_SECONDS = 3600      # 1 година на скасування лімітки без відкату
