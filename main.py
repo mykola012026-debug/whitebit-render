@@ -104,7 +104,7 @@ def execute_trade_audit(symbol, last_known_entry_price, vol_coeff, open_time):
     try:
         set_exchange_context()
         trades = exchange.fetch_my_trades(symbol, limit=5)
-        if not ...: return
+        if not trades: return
         trades = sorted(trades, key=lambda x: x['timestamp'], reverse=True)
         exit_trade = trades[0]
         exit_price = safe_float(exit_trade.get('price'))
