@@ -28,7 +28,7 @@ SYMBOLS = [
 ]
 
 TIMEFRAME_TRADE = '15m'
-BASE_POSITION_VOLUME = 10  # Об'єм першої позиції в USDT
+BASE_POSITION_VOLUME = 6  # Об'єм першої позиції в USDT
 LEVERAGE = 10               # Базове плече
 TIMEOUT_SECONDS = 1800      # 30 хвилин для 15м свічок (щоб пастка не висіла довго)
 BREAKEVEN_TRIGGER_PCT = 0.6 # Перенесення в БУ при проходженні 60% до TP
