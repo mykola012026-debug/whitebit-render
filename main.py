@@ -10,7 +10,6 @@ SYMBOLS = [
     'ETH/USDT:USDT', 
     'SOL/USDT:USDT', 
     'ADA/USDT:USDT',
-    'DOT/USDT:USDT',
     'DOGE/USDT:USDT',
     'XRP/USDT:USDT'
 ]
