@@ -1,18 +1,6 @@
 import time
 import ccxt
 from datetime import datetime
-import pandas as pd
-import numpy as np
-import pandas_ta as ta
-import sys
-import subprocess
-
-# Перевірка бібліотеки pandas_ta перед стартом
-try:
-    import pandas_ta as ta
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
-    import pandas_ta as ta
 
 # ==============================================================================
 # --- НАЛАШТУВАННЯ ТА БЕЗПЕКА НА ОСНОВІ НАШОЇ МАТРИЦІ ---
@@ -28,26 +16,23 @@ SYMBOLS = [
 ]
 
 TIMEFRAME_TRADE = '15m'
-BASE_POSITION_VOLUME = 6  # Об'єм першої позиції в USDT
+BASE_POSITION_VOLUME = 6   # Твоя нова початкова ставка в USDT
 LEVERAGE = 10               # Базове плече
-TIMEOUT_SECONDS = 1800      # 30 хвилин для 15м свічок (щоб пастка не висіла довго)
+TIMEOUT_SECONDS = 1800      # 30 хвилин для 15м свічок
 BREAKEVEN_TRIGGER_PCT = 0.6 # Перенесення в БУ при проходженні 60% до TP
-MAX_CONCURRENT_TRADES = 3   # Розширили до 3, бо маємо топ-10 кошик
+MAX_CONCURRENT_TRADES = 3   # Максимум одночасних угод
 
-# Індивідуальні профілі: [Напрямок_Стратегії, TP_PERCENT, SL_PERCENT, Особливе_Плече]
-# На основі аналізу: Рух закриття, Макс. вихід вгору/вниз
 ASSET_PROFILES = {
     'BTC/USDT:USDT':  ['CONTR_TREND', 0.0025, 0.0012, 20], # Мікро-стоп, плече 20x
     'ETH/USDT:USDT':  ['BREAKOUT_LONG', 0.0045, 0.0015, 10],# Тільки ЛОНГ на пробій
-    'SOL/USDT:USDT':  ['CONTR_TREND', 0.0042, 0.0015, 10], # Ідеальний контр-шорт
-    'ADA/USDT:USDT':  ['CONTR_TREND', 0.0030, 0.0022, 10], # Стабільний контр-лонг
-    'DOT/USDT:USDT':  ['CONTR_TREND', 0.0035, 0.0020, 10], # Глибокі відскоки
-    'DOGE/USDT:USDT': ['CONTR_TREND', 0.0022, 0.0015, 10], # Імпульсний контр-шорт
-    'XRP/USDT:USDT':  ['CONTR_TREND', 0.0028, 0.0018, 10]  # Шортова дамп-монета
+    'SOL/USDT:USDT':  ['CONTR_TREND', 0.0042, 0.0015, 10], 
+    'ADA/USDT:USDT':  ['CONTR_TREND', 0.0030, 0.0022, 10], 
+    'DOT/USDT:USDT':  ['CONTR_TREND', 0.0035, 0.0020, 10], 
+    'DOGE/USDT:USDT': ['CONTR_TREND', 0.0022, 0.0015, 10], 
+    'XRP/USDT:USDT':  ['CONTR_TREND', 0.0028, 0.0018, 10]  
 }
 DEFAULT_PROFILE = ['CONTR_TREND', 0.003, 0.002, 10]
 
-# API підключення до WhiteBIT
 exchange = ccxt.whitebit({
     'apiKey': '9dfcbc7d6c30802daf10d0bb50bf50d1', 
     'secret': '4ff8480b5bb8914e4dacf7ac40401762', 
@@ -60,33 +45,66 @@ position_history_cache = {}
 last_heartbeat_hour = -1
 
 # ==============================================================================
-# --- МАТЕМАТИЧНИЙ ТА СТАТИСТИЧНИЙ МОДУЛЬ (PANDAS_TA) ---
+# --- ЧИСТА МАТЕМАТИКА (БЕЗ PANDAS) ---
 # ==============================================================================
 def safe_float(v, default=0.0):
     try: return float(v) if v is not None else default
     except (TypeError, ValueError): return default
 
-def get_market_indicators(symbol, timeframe, limit=50):
+def calculate_ema_list(prices, period):
+    if len(prices) < period: return [0] * len(prices)
+    k = 2 / (period + 1)
+    ema = [sum(prices[:period]) / period]
+    for price in prices[period:]:
+        ema.append(price * k + ema[-1] * (1 - k))
+    return [0] * (period - 1) + ema
+
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50.0
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    if avg_loss == 0: return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def calculate_macd_hist(prices):
+    if len(prices) < 35: return [0.0] * len(prices)
+    ema12 = calculate_ema_list(prices, 12)
+    ema26 = calculate_ema_list(prices, 26)
+    macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
+    
+    # Сигнальна лінія — це EMA(9) від лінії MACD
+    k = 2 / (9 + 1)
+    signal_line = [0.0] * 25
+    signal_line.append(sum(macd_line[25:34]) / 9)
+    for m in macd_line[34:]:
+        signal_line.append(m * k + signal_line[-1] * (1 - k))
+        
+    return [m - s for m, s in zip(macd_line, signal_line)]
+
+def get_market_data(symbol, timeframe, limit=60):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if not bars or len(bars) < 30: return None
-        
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col])
-            
-        # Розрахунок RSI та MACD через pandas_ta
-        df['RSI'] = ta.rsi(df['close'], length=14)
-        macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        if macd_df is not None:
-            df['MACD_hist'] = macd_df.iloc[:, 2]
-            
-        df['rolling_vol_avg'] = df['volume'].rolling(window=20).mean()
-        return df
-    except Exception as e:
-        print(f"⚠️ Помилка прорахунку індикаторів для {symbol}: {e}")
-        return None
+        if not bars or len(bars) < 35: return None
+        closes = [safe_float(b[4]) for b in bars]
+        volumes = [safe_float(b[5]) for b in bars]
+        return closes, volumes
+    except: return None
 
+# ==============================================================================
+# --- МОДУЛЬ УПРАВЛІННЯ ТА ЗАХИСТУ ---
+# ==============================================================================
 def set_exchange_context():
     exchange.options['accountsByType'] = {'swap': 'collateral'}
 
@@ -99,12 +117,9 @@ def get_active_positions():
             p_size = safe_float(pos.get('contracts') or pos.get('info', {}).get('amount'))
             symbol = pos.get('symbol')
             if symbol and abs(p_size) > 0.000001: real_positions[symbol] = pos
-    except Exception as e: print(f"⚠️ Помилка отримання позицій: {e}")
+    except: pass
     return real_positions
 
-# ==============================================================================
-# --- МОДУЛЬ УПРАВЛІННЯ ОРДЕРАМИ ТА АДАПТИВНОГО ЗАХИСТУ ---
-# ==============================================================================
 def control_and_protect_positions(real_positions):
     for symbol, pos in real_positions.items():
         try:
@@ -130,7 +145,6 @@ def control_and_protect_positions(real_positions):
                     elif (is_long and o_price < entry_price) or (not is_long and o_price > entry_price): has_sl, old_sl_id = True, order['id']
                     else: has_tp = True
 
-            # Виставлення індивідуальних TP/SL на основі нашої матриці
             if not has_sl or not has_tp:
                 sl_side = 'sell' if is_long else 'buy'
                 sl_price = entry_price * (1 - sl_pct) if is_long else entry_price * (1 + sl_pct)
@@ -142,10 +156,9 @@ def control_and_protect_positions(real_positions):
 
                 if not has_sl: exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_sl})
                 if not has_tp: exchange.create_order(symbol, 'market', sl_side, precise_amount, params={'stopPrice': precise_tp})
-                print(f"🛡️ [ЗАХИСТ МАТРИЦІ] {symbol.split('/')[0]} | SL: {precise_sl} ({sl_pct*100:.2f}%) | TP: {precise_tp} ({tp_pct*100:.2f}%)")
+                print(f"🛡️ [ЗАХИСТ МАТРИЦІ] {symbol.split('/')[0]} | SL: {precise_sl} | TP: {precise_tp}")
                 continue
 
-            # Розрахунок безубитку з урахуванням кастомного плеча монети
             target_pnl_to_activate = BASE_POSITION_VOLUME * current_leverage * tp_pct * BREAKEVEN_TRIGGER_PCT
             if unrealized_pnl >= target_pnl_to_activate and not has_breakeven_sl:
                 if old_sl_id:
@@ -154,7 +167,7 @@ def control_and_protect_positions(real_positions):
                 precise_entry = float(exchange.price_to_precision(symbol, entry_price))
                 precise_amount = float(exchange.amount_to_precision(symbol, abs(p_size)))
                 exchange.create_order(symbol, 'market', 'sell' if is_long else 'buy', precise_amount, params={'stopPrice': precise_entry})
-                print(f"🔥 [БЕЗУБИТОК] {symbol.split('/')[0]} | Ризик знято. Стоп у нуль: {precise_entry}")
+                print(f"🔥 [БЕЗУБИТОК] {symbol.split('/')[0]} | Стоп у нуль: {precise_entry}")
         except Exception as e: print(f"❌ Помилка модуля захисту {symbol}: {e}")
 
 def place_trap_order(symbol, side, price):
@@ -162,7 +175,6 @@ def place_trap_order(symbol, side, price):
         profile = ASSET_PROFILES.get(symbol, DEFAULT_PROFILE)
         current_leverage = profile[3]
         
-        # Встановлюємо плече для конкретного активу
         try: exchange.set_leverage(current_leverage, symbol)
         except: pass
         
@@ -177,7 +189,7 @@ def place_trap_order(symbol, side, price):
         order = exchange.create_order(symbol, 'limit', side, precise_amount, precise_price)
         return order['id'], precise_amount, precise_price
     except Exception as e:
-        print(f"❌ Помилка створення лімітки для {symbol}: {e}")
+        print(f"❌ Помилка створення лімітки {symbol}: {e}")
         return None, 0, 0
 
 def clean_orphan_orders(symbol, real_positions):
@@ -187,7 +199,6 @@ def clean_orphan_orders(symbol, real_positions):
         if open_orders and symbol not in real_positions:
             for order in open_orders:
                 if order.get('stopPrice'):
-                    print(f"🧹 [CLEAN] Видалено залишений стоп захисту для {symbol.split('/')[0]}")
                     exchange.cancel_order(order['id'], symbol)
     except: pass
 
@@ -198,11 +209,9 @@ def handle_traps_and_timeouts(symbol):
         set_exchange_context()
         order = exchange.fetch_order(trap['order_id'], symbol)
         if order['status'] in ['closed', 'filled']:
-            print(f"🕸️ [ПАСТКА СПРАЦЮВАЛА] {symbol.split('/')[0]} | Вхід у позицію підтверджено.")
             del active_traps[symbol]
         elif order['status'] == 'canceled': del active_traps[symbol]
         elif time.time() - trap['placed_time'] >= TIMEOUT_SECONDS:
-            print(f"⏰ [ТАЙМАУТ] {symbol.split('/')[0]} | Скасування ордера за часом.")
             try: exchange.cancel_order(trap['order_id'], symbol)
             except: pass
             del active_traps[symbol]
@@ -214,7 +223,7 @@ def handle_traps_and_timeouts(symbol):
 # ==============================================================================
 def main_cycle():
     global last_heartbeat_hour
-    print(f"🚀 Розумний бот Lyra V4.0 [КОМБО МАТРИЦЯ] запущений.")
+    print(f"🚀 Розумний бот Lyra V4.1 [БЕЗ PANDAS - LIGHTWEIGHT] запущений.")
     exchange.load_markets()
 
     while True:
@@ -225,66 +234,58 @@ def main_cycle():
             if real_positions: 
                 control_and_protect_positions(real_positions)
 
-            # Панель керування раз на годину
             if current_time.hour != last_heartbeat_hour:
                 print(f"\n📊 [{current_time.strftime('%H:%M')}] === МОНІТОРИНГ СВЯТОГО ГРААЛЯ ===")
-                print(f"Активних угод: {len(real_positions)} / Макс: {MAX_CONCURRENT_TRADES}")
+                print(f"Активних угод: {len(real_positions)} / Макс: {MAX_CONCURRENT_TRADES} | Базова ставка: {BASE_POSITION_VOLUME} USDT")
                 last_heartbeat_hour = current_time.hour
 
             for symbol in SYMBOLS:
                 clean_orphan_orders(symbol, real_positions)
                 handle_traps_and_timeouts(symbol)
 
-            # Перевірка ліміту паралельних угод
             if len(real_positions) >= MAX_CONCURRENT_TRADES:
                 time.sleep(15)
                 continue
 
-            # Аналіз нових точок входу
             for symbol in SYMBOLS:
                 if symbol in real_positions or symbol in active_traps: continue
 
-                df = get_market_indicators(symbol, TIMEFRAME_TRADE)
-                if df is None or len(df) < 3: continue
+                data = get_market_data(symbol, TIMEFRAME_TRADE)
+                if not data: continue
+                closes, volumes = data
 
-                # Останній закритий рядок (свічка N)
-                i = len(df) - 2 
-                rsi = df.loc[i, 'RSI']
-                hist_curr = df.loc[i, 'MACD_hist']
-                hist_prev = df.loc[i-1, 'MACD_hist']
-                vol_ratio = df.loc[i, 'volume'] / df.loc[i, 'rolling_vol_avg']
-                current_price = df.loc[i+1, 'close']
+                # Розрахунок чистих індикаторів
+                rsi = calculate_rsi(closes)
+                macd_hist = calculate_macd_hist(closes)
+                
+                avg_vol_20 = sum(volumes[-21:-1]) / 20
+                vol_ratio = volumes[-2] / avg_vol_20 if avg_vol_20 > 0 else 0.0
+                current_price = closes[-1]
+
+                hist_curr = macd_hist[-2]
+                hist_prev = macd_hist[-3]
 
                 profile = ASSET_PROFILES.get(symbol, DEFAULT_PROFILE)
                 strat_type = profile[0]
 
-                # -----------------------------------------------------------------
-                # СТРАТЕГІЯ 1: Контр-тренд (Для BTC, SOL, ADA, DOT, DOGE, XRP)
-                # -----------------------------------------------------------------
+                # СТРАТЕГІЯ 1: Контр-тренд
                 if strat_type == 'CONTR_TREND':
-                    # Зв'язуємо Combo LONG: RSI низький + розворот гістограми вгору + об'єм
                     if rsi < 35 and hist_curr > hist_prev and vol_ratio > 1.0:
-                        # Заходимо ліміткою трохи нижче ринку для ідеального зняття відкату
                         target_entry = current_price * 0.9985 
-                        print(f"🟢 [СИГНАЛ LONG] {symbol.split('/')[0]} | RSI: {rsi:.1f} | Vol: {vol_ratio:.1f}x -> Вхід: {target_entry:.4f}")
+                        print(f"🟢 [LONG] {symbol.split('/')[0]} | RSI: {rsi:.1f} | Vol: {vol_ratio:.1f}x -> Вхід: {target_entry:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'buy', target_entry)
                         if oid: active_traps[symbol] = {'order_id': oid, 'placed_time': time.time()}
 
-                    # Зв'язуємо Combo SHORT: RSI високий + розворот гістограми вниз + об'єм
                     elif rsi > 65 and hist_curr < hist_prev and vol_ratio > 1.0:
                         target_entry = current_price * 1.0015
-                        print(f"🔴 [СИГНАЛ SHORT] {symbol.split('/')[0]} | RSI: {rsi:.1f} | Vol: {vol_ratio:.1f}x -> Вхід: {target_entry:.4f}")
+                        print(f"🔴 [SHORT] {symbol.split('/')[0]} | RSI: {rsi:.1f} | Vol: {vol_ratio:.1f}x -> Вхід: {target_entry:.4f}")
                         oid, size, prc = place_trap_order(symbol, 'sell', target_entry)
                         if oid: active_traps[symbol] = {'order_id': oid, 'placed_time': time.time()}
 
-                # -----------------------------------------------------------------
-                # СТРАТЕГІЯ 2: Пробойний Лонг (Виключно для Ефіру)
-                # -----------------------------------------------------------------
+                # СТРАТЕГІЯ 2: Пробойний Лонг (ETH)
                 elif strat_type == 'BREAKOUT_LONG':
-                    # Якщо Ефір розганяється в перекупленість на великих об'ємах — стрибаємо в потяг
                     if rsi > 65 and hist_curr > hist_prev and vol_ratio > 1.3:
-                        print(f"🔥 [🚀 ПРОБІЙ ETH ЛОНГ] RSI: {rsi:.1f} | Потужний імпульс! Вхід по ринку.")
-                        # Для пробою заходимо ліміткою прямо в поточну ціну (майже маркет), щоб забрати миттєво
+                        print(f"🔥 [🚀 ПРОБІЙ ETH] RSI: {rsi:.1f} | Потужний імпульс! Заходимо.")
                         oid, size, prc = place_trap_order(symbol, 'buy', current_price)
                         if oid: active_traps[symbol] = {'order_id': oid, 'placed_time': time.time()}
 
